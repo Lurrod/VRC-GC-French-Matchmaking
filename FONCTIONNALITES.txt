@@ -1,0 +1,422 @@
+================================================================================
+                  BOT DISCORD VALORANT 10MANS - FONCTIONNALITES
+================================================================================
+
+Bot Discord pour organiser des parties customs Valorant 5v5 avec systeme ELO,
+classement integre, queue automatique, equilibrage des equipes via API Riot
+(HenrikDev) et vote de resultat.
+
+Serveur reserve aux joueurs **EU + peak Immortal 1 minimum (>= 2400)**.
+Le bot refuse automatiquement de lier les comptes qui ne respectent pas ce
+critere.
+
+
+================================================================================
+0. INSTALLATION SUR UN SERVEUR (V2)
+================================================================================
+
+  /setup
+    Commande tout-en-un reservee aux admins (manage_guild).
+    Cree automatiquement :
+      - Categorie "🎮 Valorant 10mans"
+      - Salon "leaderboard"  (ou /leaderboard reste public)
+      - Salon "queue"        (ou est pose le message Rejoindre/Quitter)
+      - Salon "matchs"       (ou seront postes les matches formes)
+    Pose immediatement le message de queue dans #queue avec ses boutons.
+    Idempotent : re-executable sans risque, saute ce qui existe deja.
+    Reponse ephemere visible uniquement par l'admin.
+
+
+================================================================================
+1. SYSTEME DE QUEUE (V2)
+================================================================================
+
+  /setup-queue
+    Pose un message persistant avec 2 boutons (Rejoindre / Quitter) dans le
+    salon courant. Reserve aux administrateurs (perm manage_guild).
+    Si une queue existe deja, elle est remplacee.
+    (Note : /setup le fait automatiquement dans #queue, cette commande sert a
+    re-poser manuellement le message si besoin.)
+
+  /close-queue
+    Supprime la queue active. Reserve aux administrateurs.
+
+  Bouton [Rejoindre]
+    Le joueur entre en file d'attente.
+    Confirmation EPHEMERE : "✅ Tu as rejoint la queue (X/10)" visible
+    uniquement par celui qui a clique.
+    REFUSE si :
+      - Pas de compte Riot lie (-> /link-riot d'abord)
+      - Deja en queue
+      - Queue pleine (10/10)
+      - Queue fermee (match en cours de formation)
+
+  Bouton [Quitter]
+    Le joueur sort de la file d'attente.
+    REFUSE si pas dans la queue.
+
+  Auto-trigger a 10 joueurs
+    Des qu'un 10e joueur rejoint, le bot ferme la queue (status "forming")
+    et lance la formation du match.
+
+  Persistance complete
+    Les boutons restent fonctionnels apres restart du bot (custom_ids stables :
+    queue_v2:join et queue_v2:leave).
+
+
+================================================================================
+2. LIEN COMPTE RIOT (V2)
+================================================================================
+
+  /link-riot riot_id:Pseudo#TAG
+    Lie ton compte Discord a ton compte Valorant via l'API HenrikDev.
+    Region forcee a EU (pas de parametre region — serveur reserve EU).
+
+    RESTRICTION : peak Immortal 1+ (effective_elo >= 2400) requis.
+      - Si max(peak detecte, MMR courant) < 2400 -> link refuse
+      - Message d'erreur affiche le tier detecte
+
+    Le bot calcule ton "effective ELO" selon la regle :
+      - Si ton peak ELO date de moins de 6 mois -> on prend le peak
+      - Sinon -> moyenne des MMR sur les 6 derniers mois
+      - Si aucun match recent -> peak en fallback
+
+    Affiche le rang actuel, l'effective ELO, le peak, et la source du calcul.
+    Cache 1h pour ne pas spammer l'API HenrikDev.
+
+  /unlink-riot
+    Supprime le lien avec ton compte Riot.
+
+  /refresh-elo
+    Force un recalcul de ton effective ELO (vide le cache HenrikDev).
+
+
+================================================================================
+3. FORMATION AUTOMATIQUE DES EQUIPES (V2)
+================================================================================
+
+Quand 10 joueurs sont en queue :
+
+  1. Recupere l'effective ELO de chaque joueur (depuis la base liee a /link-riot)
+  2. Equilibre les 2 equipes via l'algo BRUTE-FORCE OPTIMAL :
+       - Itere sur les 126 partitions uniques de 5+5 parmi 10
+       - Minimise |sum(team_a) - sum(team_b)|
+       - Tie-breaker : minimise |max(team_a) - max(team_b)|
+       - Tie-breaker 2 : ordre des IDs (deterministe)
+  3. Trouve une categorie "Match #1", "Match #2" ou "Match #3" dont les vocaux
+     "Team 1" et "Team 2" sont vides
+  4. Choisit aleatoirement :
+       - Une map parmi : Breeze, Bind, Lotus, Fracture, Split, Haven, Pearl
+       - Un lobby leader parmi les 10 joueurs (chargé de creer le lobby Valorant)
+  5. Poste un message qui mentionne (@) les 10 joueurs avec un embed contenant :
+       - La map choisie
+       - Le lobby host
+       - Composition Team A (mentions + ELO de chaque joueur)
+       - Composition Team B (mentions + ELO de chaque joueur)
+       - L'ecart d'equilibrage (diff totale et diff de peak)
+       - Quels vocaux rejoindre (Match #N / Team 1 et Team 2)
+       - Compteur de votes (initialement 0/0)
+  6. Persiste le match en base (matches_<guild_id>)
+  7. Reset la queue pour le prochain match
+
+
+================================================================================
+4. SYSTEME DE VOTE (V2)
+================================================================================
+
+Apres formation, 2 boutons attaches au message du match :
+
+  [Team A gagne]    [Team B gagne]
+
+  Regles :
+    - SEULS les 10 participants peuvent voter
+    - Vote modifiable (cliquer A puis B ecrase A par B)
+    - Si un autre user clique : refus avec message ephemere
+    - Si match deja valide : refus
+
+  Validation :
+    - Des qu'une equipe atteint 7/10 votes -> match valide automatiquement
+    - L'embed se met a jour en temps reel avec le score des votes
+
+  Timeout 5 minutes :
+    - Une tache periodique scanne tous les matches "pending"
+    - Si un match a > 5 min sans atteindre 7/10 -> status "contested"
+    - Le bot ping le role admin (Admin / Match Staff / Administrateur)
+    - Le score actuel est affiche dans le ping
+    - L'admin peut alors valider manuellement via les commandes V1
+
+
+================================================================================
+5. MISE A JOUR ELO POST-VOTE (V2)
+================================================================================
+
+Quand un match est valide (7/10 atteint), le bot calcule automatiquement les
+gains/pertes ELO et les applique sur le leaderboard interne.
+
+  Formule LINEAIRE calibree pour un serveur Immortal+ :
+    - reference = 2400 (Immortal 1)
+    - gain = round(20 * avg_elo / 2400)
+    - loss = round(10 * avg_elo / 2400)
+
+  Exemples (toutes les valeurs realistes pour un match Immortal+) :
+    avg=2400 (Immortal 1) -> +20 / -10   <- baseline
+    avg=2500 (Immortal 1+) -> +21 / -10
+    avg=2700 (Immortal 3) -> +22 / -11
+    avg=3000 (Radiant)    -> +25 / -12
+
+  L'ELO d'un perdant ne descend jamais sous 0 (plancher).
+  Compteurs wins/losses incrementes automatiquement.
+
+  Recap envoye dans le salon avec :
+    - Equipe gagnante / perdante
+    - Avg ELO du match
+    - Gain/loss exact
+    - Liste de chaque joueur avec son ancien ELO -> nouveau ELO
+
+
+================================================================================
+6. COMMANDES ELO ADMIN MANUELLES (V2)
+================================================================================
+
+Pour les cas ou l'admin enregistre un resultat sans passer par la queue/vote
+automatique. Le gain/loss est PROPORTIONNEL a la moyenne d'ELO du groupe
+(meme formule lineaire que la validation automatique de match).
+
+  /win @j1..@j5
+    Enregistre une victoire pour 1 a 5 joueurs.
+    Tous les gagnants prennent le MEME gain (pas de bonus par position).
+    Calcul :
+      avg = moyenne d'effective_elo Riot des joueurs (fallback 2400 si pas lie)
+      gain = round(20 * avg / 2400)
+    Exemples (calibrage Immortal+) :
+      avg=2400 (Immortal 1) -> +20 chacun
+      avg=2700 (Immortal 3) -> +22 chacun
+      avg=3000 (Radiant)    -> +25 chacun
+
+  /lose @j1..@j5
+    Enregistre une defaite pour 1 a 5 joueurs.
+    Toutes les pertes sont egales (pas de penalite par position).
+    Calcul :
+      avg = moyenne d'effective_elo Riot des joueurs (fallback 2400 si pas lie)
+      loss = round(10 * avg / 2400)
+    Plancher a 0 (l'ELO ne descend jamais sous 0).
+
+  /elomodify @joueur action:[add/remove] montant:N
+    Ajoute ou retire N points ELO a un joueur.
+
+  /winmodify @joueur action:[add/remove] montant:N
+    Ajoute ou retire N victoires.
+
+  /losemodify @joueur action:[add/remove] montant:N
+    Ajoute ou retire N defaites.
+
+  /resetelo joueur:@j  ou  all:True
+    Remet l'ELO d'un joueur (ou de tous) a 0.
+
+Toutes ces commandes sont reservees aux admins (manage_guild) ou au role
+configure via /bypass.
+
+
+================================================================================
+7. CLASSEMENT ET STATS
+================================================================================
+
+  /leaderboard
+    Affiche le classement ELO du serveur sous forme d'image generee par
+    leaderboard_img.py (15 joueurs par page, navigation par boutons
+    "<" / ">" persistant 5 minutes).
+    Pagination corrigee : navigation fiable via inter.followup.edit_message.
+
+    Visibilite :
+      - Dans un salon dont le nom contient "leaderboard" -> PUBLIC
+        (visible par tout le monde sur le serveur)
+      - Dans tout autre salon -> EPHEMERE
+        (visible uniquement par celui qui a tape la commande)
+
+  /stats [@joueur]
+    Affiche les stats ELO d'un joueur :
+      - ELO actuel
+      - Rang dans le classement
+      - Winrate %
+      - Victoires / Defaites / Parties totales
+    Sans mention -> tes propres stats.
+    TOUJOURS EPHEMERE : visible uniquement par celui qui a tape la commande.
+
+  Versions prefix !leaderboard et !stats egalement disponibles.
+
+
+================================================================================
+8. OUTILS UTILITAIRES
+================================================================================
+
+  /map
+    Selectionne une map aleatoire parmi les 7 maps Valorant.
+    Reserve aux admins.
+
+  /coinflip
+    Pile ou face.
+
+  /clear nombre
+    Supprime jusqu'a 100 messages dans le salon courant.
+    Reserve aux admins.
+
+  /help [type:membres/admin]
+    Affiche la liste des commandes disponibles selon le type d'utilisateur.
+
+  /bypass @role
+    Donne acces aux commandes admin a un role (admin uniquement).
+
+
+================================================================================
+9. SYSTEME DE CANDIDATURES (heritage V1)
+================================================================================
+
+  /welcome
+    Pose un message de bienvenue dans le salon "verify" avec un bouton
+    "Postuler" persistant. Reserve aux admins.
+
+  Bouton [Postuler]
+    Ouvre un choix : Joueur ou Coach/Analyst/Manager.
+    Cooldown 1h entre 2 candidatures par utilisateur.
+
+  Modale Joueur
+    Champs : Pseudo en jeu, Lien tracker, Tournois/LAN deja participes.
+    Postee dans le salon "candidatures" avec boutons Accepter/Refuser.
+
+  Modale Staff
+    Champs : Pseudo, Poste actuel, Experiences.
+    Postee comme une candidature de type staff.
+
+  Bouton [Accepter] (admin)
+    Donne le role "Members" (ou "Coach/Analyst/Manager" pour les staff).
+    Renomme le membre avec son pseudo.
+    DM de confirmation au candidat.
+    Edit le message pour montrer qui a accepte.
+
+  Bouton [Refuser] (admin)
+    Ouvre une modale optionnelle pour la raison.
+    Kick le candidat avec la raison.
+    DM au candidat avec la raison.
+    Edit le message pour montrer qui a refuse et pourquoi.
+
+
+================================================================================
+10. PERSISTANCE MONGODB
+================================================================================
+
+Une base "elobot" avec collections suivantes :
+
+  elo_<guild_id>
+    Classement ELO V1 (un doc par joueur).
+    {_id, name, elo, wins, losses}
+
+  riot_accounts_<guild_id>
+    Lien Discord <-> Riot.
+    {_id, riot_name, riot_tag, riot_region, puuid, effective_elo, peak_elo,
+     source, fetched_at}
+
+  queue_<guild_id>
+    Queue active V2 (1 doc par guild, _id = "active").
+    {_id: "active", channel_id, message_id, players, status, created_at}
+
+  matches_<guild_id>
+    Historique des matches V2.
+    {_id: ObjectId, team_a, team_b, map, lobby_leader_id, category_name,
+     status (pending/validated_a/validated_b/contested), votes, created_at,
+     validated_at, message_id, channel_id}
+
+  bypass
+    Roles ayant acces aux commandes admin par guild.
+    {_id: <guild_id>, role_id}
+
+  candidature_cooldowns
+    Cooldowns 1h pour le systeme de candidatures.
+    {_id: <user_id>, last_apply}
+
+
+================================================================================
+11. ARCHITECTURE DU CODE
+================================================================================
+
+bot.py                    Entry point (charge les cogs, demarre le bot)
+
+services/                 Logique pure (testable sans Discord)
+  elo_calc.py             Constantes ELO + calculs (gain/loss/winrate)
+  elo_mapping.py          Conversion tier numerique <-> nom (Iron 1, Radiant)
+  elo_updater.py          MAJ ELO post-vote (gain proportionnel a l'avg)
+  match_service.py        Build players, plan match, find free category
+  peak_calculator.py      Regle 6 mois (peak recent / moyenne 6m)
+  repository.py           Acces MongoDB centralise
+  riot_api.py             Client HenrikDev (cache 1h, gestion 404/429)
+  team_balancer.py        Algo brute-force optimal d'equilibrage
+
+cogs/                     Discord wiring (slash commands + views)
+  match.py                MatchCog + VoteView (formation + vote + ELO update)
+  queue_v2.py             QueueCog + QueueView (rejoindre/quitter)
+  riot_link.py            /link-riot, /unlink-riot, /refresh-elo
+
+leaderboard_img.py        Generation image du leaderboard (stub par defaut)
+
+Outils de test (n'embarquent PAS le vrai bot) :
+  preview_leaderboard.py  Genere N faux joueurs et rend chaque page en PNG
+  seed_users.py           Remplit MongoDB de faux joueurs pour tester en dev
+
+
+================================================================================
+12. TESTS
+================================================================================
+
+233 tests automatises, executes en ~1.3 seconde via pytest.
+
+  test_pagination.py        23 tests  Logique pagination pure
+  test_elo_calc.py          27 tests  Calculs ELO purs
+  test_team_balancer.py     13 tests  Algo equilibrage
+  test_peak_calculator.py   23 tests  Regle 6 mois
+  test_riot_api.py          16 tests  Client HenrikDev (mocks HTTP)
+  test_riot_link.py         11 tests  Cog /link-riot + check Immortal+
+  test_queue_v2.py          26 tests  Repository + QueueView + confirmation ephemere
+  test_match_service.py     13 tests  Logique pure de formation
+  test_match_cog.py          8 tests  Integration cog match
+  test_vote.py              24 tests  Vote + timeout + MAJ ELO
+  test_elo_updater.py       22 tests  MAJ ELO en base
+  test_bot_slash.py         19 tests  Slash commands + /setup + /win V2 (mocks Discord)
+  test_bot_prefix.py         8 tests  Prefix commands V1 (dpytest)
+
+Lancer tous les tests :
+    pip install -r requirements-test.txt
+    pytest
+
+
+================================================================================
+13. DEPLOIEMENT
+================================================================================
+
+Variables d'environnement requises (voir .env.example) :
+    DISCORD_TOKEN     Token du bot Discord (obligatoire)
+    MONGO_URL         URL MongoDB (defaut : mongodb://localhost:27017)
+    HENRIK_API_KEY    Cle HenrikDev (optionnel, augmente le rate limit)
+
+Setup serveur Discord :
+
+  /!\ Le plus simple : invite le bot puis tape /setup -> tout est cree
+      automatiquement (categorie + salons leaderboard / queue / matchs +
+      message de queue prepose).
+
+  Salons supplementaires (V1 heritage, a creer manuellement si besoin) :
+    - Salon "verify" pour /welcome (candidatures)
+    - Salon "candidatures" pour les modales de candidature
+    - Salon "match-preparation" pour les annonces de match (V1 vocal queue)
+    - Categories "Match #1", "Match #2", "Match #3" avec :
+        Team 1 (vocal)
+        Team 2 (vocal)
+        match-preparation (texte)
+    - Roles : Members, Coach/Analyst/Manager, Admin (ou Match Staff)
+
+  Permissions Discord requises pour le bot :
+    Voir les salons, Envoyer des messages, Integrer des liens,
+    Joindre des fichiers, Gerer les salons (pour /setup),
+    Gerer les messages (pour /clear), Utiliser les commandes slash.
+
+Lancer le bot :
+    pip install -r requirements.txt
+    python bot.py
