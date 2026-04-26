@@ -75,8 +75,11 @@ def winrate(wins: int, losses: int) -> float:
 # Serveur reserve aux joueurs Immortal+ : la baseline est l'Immortal 1.
 IMMORTAL_FLOOR_ELO: Final[int] = 2400   # Immortal 1 (HenrikDev tier 24 * 100)
 ELO_REFERENCE:      Final[int] = IMMORTAL_FLOOR_ELO
-ELO_BASE_GAIN:      Final[int] = 20     # gain attendu a avg = ELO_REFERENCE
-ELO_BASE_LOSS:      Final[int] = 10     # loss attendu a avg = ELO_REFERENCE
+# Zero-sum strict : gain == loss. ELO injectee par match = 0.
+ELO_BASE_CHANGE:    Final[int] = 15     # gain et loss attendus a avg = ELO_REFERENCE
+# Alias retro-compatibles (utilises par tests/code legacy)
+ELO_BASE_GAIN:      Final[int] = ELO_BASE_CHANGE
+ELO_BASE_LOSS:      Final[int] = ELO_BASE_CHANGE
 
 
 def compute_team_avg_elo(players: list[dict]) -> int:
@@ -88,15 +91,16 @@ def compute_team_avg_elo(players: list[dict]) -> int:
 
 def compute_match_elo_change(avg_match_elo: int) -> tuple[int, int]:
     """
-    Renvoie (gain, loss) proportionnels a l'ELO moyen du match.
+    Renvoie (gain, loss) zero-sum strict : gain == loss, proportionnels
+    a l'ELO moyen du match.
 
     Calibre pour un serveur Immortal+ :
-      - avg = 2400 (Immortal 1)  -> (20, 10)
-      - avg = 2700 (Immortal 3)  -> (22, 11)
-      - avg = 3000 (Radiant)     -> (25, 12)
+      - avg = 2400 (Immortal 1)  -> (15, 15)
+      - avg = 2700 (Immortal 3)  -> (17, 17)
+      - avg = 3000 (Radiant)     -> (19, 19)
     """
     if avg_match_elo < 0:
         raise ValueError(f"avg_match_elo doit etre >= 0, recu {avg_match_elo}")
-    gain = round(ELO_BASE_GAIN * avg_match_elo / ELO_REFERENCE)
-    loss = round(ELO_BASE_LOSS * avg_match_elo / ELO_REFERENCE)
-    return max(0, gain), max(0, loss)
+    change = round(ELO_BASE_CHANGE * avg_match_elo / ELO_REFERENCE)
+    change = max(0, change)
+    return change, change

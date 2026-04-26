@@ -166,19 +166,26 @@ class QueueCog(commands.Cog):
         # Reset de la queue precedente s'il y en avait une
         repository.delete_active_queue(self.db, interaction.guild_id)
 
-        embed = build_queue_embed(None, interaction.guild)
-        msg = await interaction.channel.send(embed=embed, view=self.view)
-
-        repository.setup_active_queue(
-            self.db,
-            guild_id=interaction.guild_id,
-            channel_id=interaction.channel_id,
-            message_id=msg.id,
-        )
+        await self.post_queue_message(interaction.channel)
 
         await interaction.response.send_message(
             f"✅ Queue active dans {interaction.channel.mention} !",
             ephemeral=True,
+        )
+
+    async def post_queue_message(self, channel: discord.TextChannel) -> None:
+        """Pose un nouveau message de queue dans `channel` et l'enregistre.
+
+        Utilise par /setup-queue ET par le cog match apres formation
+        d'un match (pour qu'une nouvelle queue soit immediatement disponible).
+        """
+        embed = build_queue_embed(None, channel.guild)
+        msg = await channel.send(embed=embed, view=self.view)
+        repository.setup_active_queue(
+            self.db,
+            guild_id=channel.guild.id,
+            channel_id=channel.id,
+            message_id=msg.id,
         )
 
     @app_commands.command(name="close-queue", description="Ferme la queue active")

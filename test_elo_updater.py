@@ -10,18 +10,21 @@ from services.elo_updater import (
 )
 
 
-# ── compute_match_elo_change (formule pure) ───────────────────────
-@pytest.mark.parametrize("avg,gain,loss", [
-    (0,    0,  0),
-    (300,  2,  1),
-    (2100, 18, 9),     # sous le floor (Immortal-)
-    (2400, 20, 10),    # Immortal 1 = baseline
-    (2700, 22, 11),    # Immortal 3
-    (3000, 25, 12),    # Radiant
+# ── compute_match_elo_change (formule pure, zero-sum) ─────────────
+@pytest.mark.parametrize("avg,change", [
+    (0,    0),
+    (300,  2),
+    (2100, 13),     # sous le floor (Immortal-)
+    (2400, 15),    # Immortal 1 = baseline
+    (2700, 17),    # Immortal 3
+    (3000, 19),    # Radiant
 ])
-def test_compute_match_elo_change(avg, gain, loss):
+def test_compute_match_elo_change(avg, change):
+    """Zero-sum strict : gain == loss."""
     g, l = elo_calc.compute_match_elo_change(avg)
-    assert (g, l) == (gain, loss)
+    assert g == change
+    assert l == change
+    assert g == l
 
 
 def test_compute_match_elo_change_rejects_negative():
@@ -64,8 +67,8 @@ def test_validated_a_winners_get_gain():
     match = _make_match(status="validated_a", elo=2400)
     outcome = apply_match_validation(bot_module.db, 42, match)
 
-    assert outcome.gain == 20
-    assert outcome.loss == 10
+    assert outcome.gain == 15      # zero-sum a avg=2400
+    assert outcome.loss == 15
     assert outcome.avg_elo == 2400
 
     # Toutes les changes : team_a (0..4) gagne, team_b (5..9) perd
@@ -88,26 +91,26 @@ def test_validated_b_swaps_winners_losers():
 
 def test_winners_get_plus_gain_in_db():
     import bot as bot_module
-    match = _make_match(elo=2400)  # avg=2400 -> gain=20
+    match = _make_match(elo=2400)  # avg=2400 -> change=15
     apply_match_validation(bot_module.db, 42, match)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 20
+        assert doc["elo"] == 15
         assert doc["wins"] == 1
         assert doc["losses"] == 0
 
 
 def test_losers_get_minus_loss_in_db():
     import bot as bot_module
-    match = _make_match(elo=2400)  # loss=10
+    match = _make_match(elo=2400)
     apply_match_validation(bot_module.db, 42, match)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5, 10):
         doc = elo_col.find_one({"_id": str(i)})
-        # New player : ELO_START=0, max(0, 0-10) = 0
+        # New player : ELO_START=0, max(0, 0-15) = 0
         assert doc["elo"] == 0
         assert doc["losses"] == 1
         assert doc["wins"] == 0
@@ -118,11 +121,11 @@ def test_loser_existing_elo_decreases_correctly():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     elo_col.insert_one({"_id": "5", "name": "B0", "elo": 50, "wins": 0, "losses": 0})
 
-    match = _make_match(elo=2400)  # loss=10
+    match = _make_match(elo=2400)  # loss=15
     apply_match_validation(bot_module.db, 42, match)
 
     doc = elo_col.find_one({"_id": "5"})
-    assert doc["elo"] == 40
+    assert doc["elo"] == 35
     assert doc["losses"] == 1
 
 
@@ -131,7 +134,7 @@ def test_loser_floored_at_zero():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     elo_col.insert_one({"_id": "5", "name": "B0", "elo": 5, "wins": 0, "losses": 0})
 
-    match = _make_match(elo=2400)  # loss=10 mais courrant=5 -> 0
+    match = _make_match(elo=2400)  # loss=15 mais courrant=5 -> 0
     apply_match_validation(bot_module.db, 42, match)
 
     doc = elo_col.find_one({"_id": "5"})
@@ -140,23 +143,23 @@ def test_loser_floored_at_zero():
 
 def test_high_elo_match_bigger_swings():
     import bot as bot_module
-    # Radiant (avg=3000) -> gain=25, loss=12
+    # Radiant (avg=3000) zero-sum -> change=19
     match = _make_match(elo=3000)
     outcome = apply_match_validation(bot_module.db, 42, match)
-    assert outcome.gain == 25
-    assert outcome.loss == 12
+    assert outcome.gain == 19
+    assert outcome.loss == 19
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    assert elo_col.find_one({"_id": "0"})["elo"] == 25
+    assert elo_col.find_one({"_id": "0"})["elo"] == 19
 
 
 def test_low_elo_match_smaller_swings():
     import bot as bot_module
-    # avg sous le floor (300) -> gain 2, loss 1
+    # avg sous le floor (300) zero-sum -> change=2
     match = _make_match(elo=300)
     outcome = apply_match_validation(bot_module.db, 42, match)
     assert outcome.gain == 2
-    assert outcome.loss == 1
+    assert outcome.loss == 2
 
 
 def test_existing_winner_keeps_history_and_adds_gain():
@@ -168,7 +171,7 @@ def test_existing_winner_keeps_history_and_adds_gain():
     apply_match_validation(bot_module.db, 42, match)
 
     doc = elo_col.find_one({"_id": "0"})
-    assert doc["elo"] == 220       # 200 + 20
+    assert doc["elo"] == 215       # 200 + 15
     assert doc["wins"] == 6        # 5 + 1
     assert doc["losses"] == 3      # inchange
 
@@ -182,9 +185,9 @@ def test_mixed_team_avg_elo():
         "status": "validated_a",
     }
     outcome = apply_match_validation(bot_module.db, 42, match)
-    # Avg total = (5*2200 + 5*2600) / 10 = 2400 -> gain 20
+    # Avg total = (5*2200 + 5*2600) / 10 = 2400 -> change 15
     assert outcome.avg_elo == 2400
-    assert outcome.gain == 20
+    assert outcome.gain == 15
 
 
 def test_change_dataclass_fields():
@@ -193,11 +196,11 @@ def test_change_dataclass_fields():
     outcome = apply_match_validation(bot_module.db, 42, match)
 
     winner = next(c for c in outcome.changes if c.win)
-    assert winner.delta == 20
+    assert winner.delta == 15
     assert winner.old_elo == 0
-    assert winner.new_elo == 20
+    assert winner.new_elo == 15
 
     loser = next(c for c in outcome.changes if not c.win)
-    assert loser.delta == 0   # 0 -> max(0, -10) -> 0, donc delta = 0
+    assert loser.delta == 0   # 0 -> max(0, -15) -> 0, donc delta = 0
     assert loser.old_elo == 0
     assert loser.new_elo == 0

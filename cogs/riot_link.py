@@ -8,10 +8,9 @@ Commandes :
 Aucun gate-keeping : la verification du rang des nouveaux membres est
 faite manuellement a l'entree sur le serveur Discord.
 
-Le link Riot ne sert qu'a (1) marquer le joueur comme lie (peut rejoindre
-la queue) et (2) seeder l'ELO de depart dans `elo_<guild_id>`.
-Apres le seed, l'ELO Riot n'a plus aucun impact : seuls les wins/losses
-du serveur (elo_updater apres validation de match) modifient l'ELO.
+Le link Riot seede simplement l'ELO de depart a LINK_BASE_ELO (2000)
+dans `elo_<guild_id>`. Apres le seed, l'ELO Riot n'a plus aucun impact :
+seuls les wins/losses du serveur modifient l'ELO.
 """
 
 from __future__ import annotations
@@ -23,11 +22,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from services import repository
-from services.peak_calculator import (
-    MatchEntry,
-    compute_effective_elo,
-    parse_riot_id,
-)
+from services.peak_calculator import parse_riot_id
 from services.riot_api import (
     HenrikDevClient,
     PlayerNotFound,
@@ -38,6 +33,10 @@ from services.riot_api import (
 
 # Serveur reserve aux EU
 DEFAULT_REGION = "eu"
+
+# ELO de depart distribuee a tout joueur qui lie son compte Riot.
+# Cette valeur s'ajoute a l'ELO bot deja accumulee (matches anterieurs au link).
+LINK_BASE_ELO = 2000
 
 
 class RiotLinkCog(commands.Cog):
@@ -66,11 +65,10 @@ class RiotLinkCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # 2) Recuperer account + mmr + history via HenrikDev
+        # 2) Verifier l'existence du compte Riot + recuperer le rang actuel (display)
         try:
             account = self.riot_client.get_account(name, tag)
             mmr     = self.riot_client.get_current_mmr(region, name, tag)
-            history = self.riot_client.get_mmr_history(region, name, tag)
         except PlayerNotFound:
             await interaction.followup.send(f"❌ Joueur **{name}#{tag}** introuvable.", ephemeral=True)
             return
@@ -81,26 +79,18 @@ class RiotLinkCog(commands.Cog):
             await interaction.followup.send(f"❌ Erreur Riot API : {e}", ephemeral=True)
             return
 
-        # 3) Calculer l'effective elo (regle 6 mois)
-        entries = [MatchEntry(elo=h.elo, date=h.date) for h in history]
-        result  = compute_effective_elo(
-            entries,
-            now=datetime.now(timezone.utc),
-            fallback=mmr.elo,
-        )
-
         # 3) Seed atomique de l'ELO de depart (idempotent)
-        # Premier link : elo_<guild>.elo += result.elo (+ ELO bot deja accumulee)
+        # Premier link : elo_<guild>.elo += LINK_BASE_ELO (+ ELO bot deja accumulee)
         # Re-link apres unlink : aucun changement (linked_once=True).
         final_elo, seeded_now = repository.seed_elo_with_riot_base(
             self.db,
             interaction.guild_id,
             interaction.user.id,
-            riot_base_elo=result.elo,
+            riot_base_elo=LINK_BASE_ELO,
             display_name=interaction.user.display_name,
         )
 
-        # 4) Persister la metadata Riot (gate-keep + affichage uniquement)
+        # 4) Persister la metadata Riot (utilisee pour la queue gate-keep)
         repository.link_riot_account(
             self.db,
             guild_id=interaction.guild_id,
@@ -109,8 +99,8 @@ class RiotLinkCog(commands.Cog):
             riot_tag=tag,
             riot_region=region,
             puuid=account.puuid,
-            peak_elo=result.peak,
-            source=result.source,
+            peak_elo=0,
+            source="link_base",
         )
 
         # 5) Embed de confirmation
@@ -123,8 +113,6 @@ class RiotLinkCog(commands.Cog):
         embed.add_field(name="Region", value=region.upper(),       inline=True)
         embed.add_field(name="Rang actuel", value=mmr.tier_name,   inline=True)
         embed.add_field(name="ELO serveur", value=f"**{final_elo}**", inline=True)
-        embed.add_field(name="Peak Riot", value=f"**{result.peak}**", inline=True)
-        embed.add_field(name="Source", value=_explain_source(result.source), inline=True)
         if not seeded_now:
             embed.add_field(
                 name="ℹ️ Note",
@@ -144,14 +132,6 @@ class RiotLinkCog(commands.Cog):
             await interaction.response.send_message("✅ Compte Riot delie.", ephemeral=True)
         else:
             await interaction.response.send_message("ℹ️ Aucun compte Riot lie.", ephemeral=True)
-
-def _explain_source(source: str) -> str:
-    return {
-        "peak_6m":            "🏔️ Peak ELO sur les 6 derniers mois",
-        "no_recent_history":  "📭 Aucun match recent (MMR courant utilise)",
-        "empty":              "❓ Aucun historique",
-    }.get(source, source)
-
 
 async def setup(bot: commands.Bot, db, riot_client: HenrikDevClient) -> None:
     await bot.add_cog(RiotLinkCog(bot, db, riot_client))

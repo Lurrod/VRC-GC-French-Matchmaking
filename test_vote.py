@@ -398,7 +398,7 @@ def _seed_match_with_avg_2400(db, guild_id: int = 42, message_id: int = 555):
 
 
 async def test_validation_triggers_elo_update_in_db():
-    """Le 7e vote A -> 5 gagnants +20, 5 perdants -10 (sol a 0)."""
+    """Le 7e vote A -> 5 gagnants +15, 5 perdants -15 (sol a 0)."""
     import bot as bot_module
     from cogs.match import MatchCog
 
@@ -418,11 +418,11 @@ async def test_validation_triggers_elo_update_in_db():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 20, f"Winner {i}: ELO {doc['elo']}"
+        assert doc["elo"] == 15, f"Winner {i}: ELO {doc['elo']}"
         assert doc["wins"] == 1
     for i in range(5, 10):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 0  # 0 - 10 -> max(0, ...) = 0
+        assert doc["elo"] == 0  # 0 - 15 -> max(0, ...) = 0
         assert doc["losses"] == 1
 
 
@@ -453,12 +453,12 @@ async def test_validation_sends_recap_embed():
     fields = {f.name: f.value for f in recap.fields}
     assert any("Gagnants" in n for n in fields)
     assert any("Perdants" in n for n in fields)
-    # Verifie qu'on voit le delta +20
-    assert "+20" in fields["🟢 Gagnants"]
+    # Verifie qu'on voit le delta +15
+    assert "+15" in fields["🟢 Gagnants"]
 
 
 async def test_validation_with_high_elo_match_bigger_gain():
-    """Avg=3000 (Radiant) -> gain 25, loss 12."""
+    """Avg=3000 (Radiant) zero-sum -> gain=loss=19."""
     import bot as bot_module
     from cogs.match import MatchCog
 
@@ -483,7 +483,7 @@ async def test_validation_with_high_elo_match_bigger_gain():
         await cog.vote_view.vote_a.callback(inter)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    assert elo_col.find_one({"_id": "0"})["elo"] == 25    # winner +25 (Radiant avg)
+    assert elo_col.find_one({"_id": "0"})["elo"] == 19    # winner +19 (Radiant avg)
 
 
 async def test_validated_b_distributes_correctly():
@@ -503,9 +503,9 @@ async def test_validated_b_distributes_correctly():
         await cog.vote_view.vote_b.callback(inter)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    # team_b (5..9) gagnent +20
+    # team_b (5..9) gagnent +15
     for i in range(5, 10):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 20
+        assert elo_col.find_one({"_id": str(i)})["elo"] == 15
         assert elo_col.find_one({"_id": str(i)})["wins"] == 1
     # team_a (0..4) perdent (mais demarrent a 0 -> reste 0)
     for i in range(5):

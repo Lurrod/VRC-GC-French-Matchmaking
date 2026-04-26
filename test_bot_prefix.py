@@ -115,7 +115,7 @@ async def test_win_grants_elo_with_admin(discord_bot, fake_guild):
     col = bot_module.get_elo_col(fake_guild.id)
     doc = col.find_one({"_id": str(target.id)})
     assert doc is not None, "Le joueur n'a pas ete cree en base"
-    assert doc["elo"] == 20, f"ELO attendu 20, recu {doc['elo']}"
+    assert doc["elo"] == 15, f"ELO attendu 15, recu {doc['elo']}"
     assert doc["wins"] == 1
 
 

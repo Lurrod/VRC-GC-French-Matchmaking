@@ -35,6 +35,7 @@ from services.match_service import (
     plan_match,
     serialize_team,
     find_free_match_category,
+    find_free_match_prep,
 )
 
 
@@ -306,17 +307,27 @@ class MatchCog(commands.Cog):
                              "Joueur(s) sans compte Riot lie. Match annule.")
             return None
 
-        free_cat = find_free_match_category(guild)
-        plan     = plan_match(players, free_category=free_cat, rng=self.rng)
-
-        channel = guild.get_channel(int(queue_doc["channel_id"]))
-        if channel is None:
+        # Channel d'origine de la queue (pour reposter le setup-queue apres)
+        queue_channel = guild.get_channel(int(queue_doc["channel_id"]))
+        if queue_channel is None:
             await self._fail(interaction, queue_doc, "Salon de queue introuvable.")
             return None
 
+        # Recherche d'un salon 'match-preparation' libre (categories Match #1/2/3)
+        free = find_free_match_prep(guild)
+        if free is None:
+            await self._fail(
+                interaction, queue_doc,
+                "Aucun salon 'match-preparation' libre dans les categories Match #1/2/3.",
+            )
+            return None
+        free_cat_name, prep_channel = free
+
+        plan = plan_match(players, free_category=free_cat_name, rng=self.rng)
+
         mentions = " ".join(f"<@{p.id}>" for p in players)
         embed    = build_match_embed(plan, guild.name)
-        msg = await channel.send(
+        msg = await prep_channel.send(
             content=f"🎯 Match trouve ! {mentions}",
             embed=embed,
             view=self.vote_view,
@@ -331,10 +342,18 @@ class MatchCog(commands.Cog):
             lobby_leader_id=plan.lobby_leader.id,
             category_name=plan.category_name,
             message_id=msg.id,
-            channel_id=channel.id,
+            channel_id=prep_channel.id,
         )
 
+        # Reset queue + repose le message setup-queue dans le salon d'origine
+        # pour qu'une nouvelle queue soit immediatement disponible.
         repository.delete_active_queue(self.db, guild.id)
+        queue_cog = self.bot.get_cog("QueueCog")
+        if queue_cog is not None:
+            try:
+                await queue_cog.post_queue_message(queue_channel)
+            except Exception as e:
+                print(f"[match] echec re-post setup-queue : {e}")
         return match_id
 
     async def _fail(self, interaction, queue_doc, reason: str) -> None:

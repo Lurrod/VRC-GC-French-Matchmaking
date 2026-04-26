@@ -124,11 +124,11 @@ async def test_slash_win_5_players_distributes_elo_v2():
         joueur4=targets[3], joueur5=targets[4],
     )
 
-    # Sans Riot link : fallback ELO_REFERENCE=1500 -> gain=20 pour chacun
+    # Sans Riot link : fallback ELO_REFERENCE=2400 -> change=15 pour chacun
     col = bot_module.get_elo_col(42)
     for t in targets:
         doc = col.find_one({"_id": str(t.id)})
-        assert doc["elo"] == 20, f"{t.display_name}: attendu 20, recu {doc['elo']}"
+        assert doc["elo"] == 15, f"{t.display_name}: attendu 15, recu {doc['elo']}"
         assert doc["wins"] == 1
 
 
@@ -141,7 +141,7 @@ async def test_slash_win_uses_server_avg_when_seeded():
     guild = _fake_guild(42, members=[admin] + targets)
     inter = _fake_interaction(admin, guild)
 
-    # Seed une ELO serveur de 3000 (Radiant) -> gain = 25
+    # Seed une ELO serveur de 3000 (Radiant) -> change = 19 (zero-sum)
     col = bot_module.get_elo_col(42)
     for t in targets:
         col.insert_one({
@@ -153,7 +153,7 @@ async def test_slash_win_uses_server_avg_when_seeded():
 
     for t in targets:
         doc = col.find_one({"_id": str(t.id)})
-        assert doc["elo"] == 3025, f"{t.display_name}: attendu 3025 (3000 + 25), recu {doc['elo']}"
+        assert doc["elo"] == 3019, f"{t.display_name}: attendu 3019 (3000 + 19), recu {doc['elo']}"
 
 
 # ── /lose ─────────────────────────────────────────────────────────
@@ -170,11 +170,11 @@ async def test_slash_lose_floors_at_zero():
     col.insert_one({"_id": "2", "name": "Bob",   "elo": 5,    "wins": 0, "losses": 0})
     col.insert_one({"_id": "3", "name": "Boost", "elo": 2995, "wins": 0, "losses": 0})
 
-    # avg(5, 2995) = 1500 -> loss = round(10 * 1500/2400) = 6. Bob: max(0, 5 - 6) = 0
+    # avg(5, 2995) = 1500 -> change zero-sum = round(15 * 1500/2400) = 9. Bob: max(0, 5 - 9) = 0
     await bot_module.lose.callback(inter, joueur1=target, joueur2=partner)
 
     assert col.find_one({"_id": "2"})["elo"] == 0
-    assert col.find_one({"_id": "3"})["elo"] == 2989
+    assert col.find_one({"_id": "3"})["elo"] == 2986
 
 
 # ── /leaderboard + LeaderboardView (le bug initial) ───────────────

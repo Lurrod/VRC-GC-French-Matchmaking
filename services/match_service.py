@@ -103,8 +103,19 @@ def find_free_match_category(guild) -> str | None:
     """
     Cherche une categorie 'Match #1/2/3' dont les VCs Team 1 / Team 2 sont vides.
     Renvoie le nom de la categorie ou None si aucune libre.
+    """
+    free = find_free_match_prep(guild)
+    return free[0] if free else None
 
-    Logique reprise du V1.
+
+def find_free_match_prep(guild) -> tuple[str, object] | None:
+    """
+    Comme find_free_match_category, mais renvoie aussi le salon
+    'match-preparation' contenu dans la categorie libre.
+
+    Returns:
+        (cat_name, prep_text_channel) ou None si aucune categorie libre
+        avec un salon 'match-preparation' configure.
     """
     import discord  # import local pour ne pas alourdir l'import du module
     for i in range(1, 4):
@@ -116,6 +127,10 @@ def find_free_match_category(guild) -> str | None:
         team2 = discord.utils.get(category.voice_channels, name="Team 2")
         team1_empty = (team1 is None) or (len(team1.members) == 0)
         team2_empty = (team2 is None) or (len(team2.members) == 0)
-        if team1_empty and team2_empty:
-            return cat_name
+        if not (team1_empty and team2_empty):
+            continue
+        prep = discord.utils.get(category.text_channels, name="match-preparation")
+        if prep is None:
+            continue
+        return (cat_name, prep)
     return None

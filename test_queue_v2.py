@@ -36,6 +36,8 @@ def _fake_interaction(user, guild_id: int = 42):
     inter.guild_id = guild_id
     inter.channel_id = 100
     inter.channel = MagicMock()
+    inter.channel.id = 100
+    inter.channel.guild = inter.guild
     inter.channel.send = AsyncMock(return_value=MagicMock(id=999))
     inter.channel.mention = "#general"
     inter.response = MagicMock()

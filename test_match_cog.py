@@ -18,12 +18,20 @@ def _fake_member(member_id: int, name: str = "User"):
     return m
 
 
-def _fake_category(name: str, t1_empty: bool = True, t2_empty: bool = True):
+def _fake_category(name: str, t1_empty: bool = True, t2_empty: bool = True, with_prep: bool = True):
     cat = MagicMock()
     cat.name = name
     t1 = MagicMock(); t1.name = "Team 1"; t1.members = [] if t1_empty else [object()]
     t2 = MagicMock(); t2.name = "Team 2"; t2.members = [] if t2_empty else [object()]
     cat.voice_channels = [t1, t2]
+    if with_prep:
+        prep = MagicMock()
+        prep.name = "match-preparation"
+        prep.id = 700 + (hash(name) % 100)
+        prep.send = AsyncMock(return_value=MagicMock(id=555))
+        cat.text_channels = [prep]
+    else:
+        cat.text_channels = []
     return cat
 
 
@@ -83,29 +91,27 @@ async def test_on_queue_full_posts_message_with_view():
 
     members = [_fake_member(i, f"P{i}") for i in range(10)]
     channel = _fake_channel(100)
+    cat = _fake_category("Match #1")
+    prep = cat.text_channels[0]
     guild = _fake_guild(42, members=members,
-                        categories=[_fake_category("Match #1")],
+                        categories=[cat],
                         channel=channel)
     inter = _fake_interaction(guild, user=members[9])
 
     cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(42))
     match_id = await cog.on_queue_full(inter, queue_doc)
 
-    # Message envoye
-    channel.send.assert_awaited_once()
-    args, kwargs = channel.send.call_args
+    # Message envoye dans le salon match-preparation
+    prep.send.assert_awaited_once()
+    args, kwargs = prep.send.call_args
     assert "Match trouve" in kwargs["content"]
-    # Tous les joueurs mentionnes
     for i in range(10):
         assert f"<@{i}>" in kwargs["content"]
 
-    # Embed bien forme
     embed = kwargs["embed"]
     assert "Map" in embed.description
     assert any("Team A" in f.name for f in embed.fields)
     assert any("Team B" in f.name for f in embed.fields)
-
-    # View attache
     assert isinstance(kwargs["view"], VoteView)
 
 
@@ -115,8 +121,10 @@ async def test_on_queue_full_persists_match():
 
     members = [_fake_member(i, f"P{i}") for i in range(10)]
     channel = _fake_channel(100)
+    cat = _fake_category("Match #1")
+    prep = cat.text_channels[0]
     guild = _fake_guild(42, members=members,
-                        categories=[_fake_category("Match #1")], channel=channel)
+                        categories=[cat], channel=channel)
     inter = _fake_interaction(guild)
 
     cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
@@ -128,7 +136,7 @@ async def test_on_queue_full_persists_match():
     assert match["map"] in ("Breeze", "Bind", "Lotus", "Fracture", "Split", "Haven", "Pearl")
     assert match["category_name"] == "Match #1"
     assert match["message_id"] == 555
-    assert match["channel_id"] == 100
+    assert match["channel_id"] == prep.id      # poste dans match-preparation
     assert len(match["team_a"]) == 5
     assert len(match["team_b"]) == 5
     assert match["votes"] == {}
@@ -151,14 +159,14 @@ async def test_on_queue_full_resets_queue():
     assert repository.get_active_queue(bot_module.db, guild_id=42) is None
 
 
-async def test_on_queue_full_uses_no_category_when_none_free():
+async def test_on_queue_full_aborts_when_no_prep_channel_free():
+    """Si toutes les categories Match # sont occupees, le match est annule."""
     import bot as bot_module
     queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
 
     members = [_fake_member(i) for i in range(10)]
     channel = _fake_channel(100)
     guild = _fake_guild(42, members=members,
-                        # toutes les categories occupees
                         categories=[
                             _fake_category("Match #1", t1_empty=False),
                             _fake_category("Match #2", t2_empty=False),
@@ -170,10 +178,12 @@ async def test_on_queue_full_uses_no_category_when_none_free():
     cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
     match_id = await cog.on_queue_full(inter, queue_doc)
 
-    match = repository.get_match(bot_module.db, 42, match_id)
-    assert match["category_name"] is None
-    embed = channel.send.call_args.kwargs["embed"]
-    assert any("Aucune categorie libre" in f.value for f in embed.fields)
+    assert match_id is None
+    # Queue annulee, message d'erreur poste dans le salon de queue
+    assert repository.get_active_queue(bot_module.db, guild_id=42) is None
+    channel.send.assert_awaited_once()
+    args, _ = channel.send.call_args
+    assert "match-preparation" in args[0]
 
 
 async def test_on_queue_full_balanced_teams_in_persistence():

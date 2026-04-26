@@ -1126,9 +1126,20 @@ async def setup_hook():
 @bot.event
 async def on_ready():
     bot.add_view(WelcomeView())
-    synced = await tree.sync()
-    print(f"Bot connecte : {bot.user} (ID: {bot.user.id})")
-    print(f"{len(synced)} commandes slash synchronisees.")
+
+    # Sync rapide sur une guild specifique si DEV_GUILD_ID est defini.
+    # Sinon, sync global (peut prendre jusqu'a 1h pour propager).
+    dev_guild_id = os.getenv("DEV_GUILD_ID")
+    if dev_guild_id:
+        guild = discord.Object(id=int(dev_guild_id))
+        tree.copy_global_to(guild=guild)
+        synced = await tree.sync(guild=guild)
+        print(f"Bot connecte : {bot.user} (ID: {bot.user.id})")
+        print(f"{len(synced)} commandes slash synchronisees sur guild {dev_guild_id}.")
+    else:
+        synced = await tree.sync()
+        print(f"Bot connecte : {bot.user} (ID: {bot.user.id})")
+        print(f"{len(synced)} commandes slash synchronisees (global, propagation jusqu'a 1h).")
 
 if __name__ == "__main__":
     if not TOKEN:
