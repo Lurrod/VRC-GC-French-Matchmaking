@@ -287,6 +287,8 @@ class MatchCog(commands.Cog):
 
         riot_accounts: dict[str, dict] = {}
         member_names:  dict[str, str]  = {}
+        bot_elos:      dict[str, int]  = {}
+        elo_col = repository.get_elo_col(self.db, guild.id)
         for uid in player_ids:
             doc = repository.get_riot_account(self.db, guild.id, uid)
             if doc:
@@ -294,8 +296,11 @@ class MatchCog(commands.Cog):
             member = guild.get_member(int(uid))
             if member:
                 member_names[uid] = member.display_name
+            elo_doc = elo_col.find_one({"_id": uid})
+            if elo_doc:
+                bot_elos[uid] = int(elo_doc.get("elo", 0))
 
-        players = build_players(player_ids, riot_accounts, member_names)
+        players = build_players(player_ids, riot_accounts, member_names, bot_elos)
         if len(players) < 10:
             await self._fail(interaction, queue_doc,
                              "Joueur(s) sans compte Riot lie. Match annule.")

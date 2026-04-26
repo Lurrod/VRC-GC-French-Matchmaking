@@ -2,13 +2,10 @@
 Calcul de l'elo effectif d'un joueur (logique pure).
 
 Regle utilisateur :
-  - Si le PEAK elo (max sur tout l'historique fourni) date de moins de 6 mois
-    -> on prend ce peak comme elo effectif.
-  - Sinon (peak vieux de plus de 6 mois) -> on prend la moyenne d'elo
-    sur les 6 derniers mois.
-  - Si aucun match dans les 6 derniers mois -> on retombe sur le peak
-    historique (seul indicateur disponible).
-  - Historique vide -> 0 (joueur unrated).
+  - On filtre l'historique aux 6 derniers mois.
+  - L'elo effectif = peak (max) parmi ces matches recents.
+  - Si aucun match dans les 6 derniers mois -> fallback (MMR courant).
+  - Historique vide -> fallback.
 """
 
 from __future__ import annotations
@@ -31,7 +28,7 @@ class MatchEntry:
 @dataclass(frozen=True)
 class EffectiveEloResult:
     elo:    int
-    source: str   # "peak_recent" | "average_6m" | "peak_fallback" | "empty"
+    source: str   # "peak_6m" | "no_recent_history" | "empty"
     peak:   int
     peak_age_days: int | None
 
@@ -62,15 +59,15 @@ def compute_effective_elo(
     fallback: int = 0,
 ) -> EffectiveEloResult:
     """
-    Applique la regle 6 mois.
+    Renvoie le peak ELO sur les 6 derniers mois (ou fallback sinon).
 
     Args:
         history:  iterable de MatchEntry (n'importe quel ordre)
         now:      pour les tests (defaut : datetime.now(UTC))
-        fallback: elo retourne si l'historique est vide
+        fallback: elo retourne si aucun match recent
 
     Returns:
-        EffectiveEloResult avec l'elo et l'explication de la source.
+        EffectiveEloResult avec l'elo (= peak des 6 derniers mois) et la source.
     """
     history = list(history)
     if now is None:
@@ -79,37 +76,21 @@ def compute_effective_elo(
     if not history:
         return EffectiveEloResult(elo=fallback, source="empty", peak=0, peak_age_days=None)
 
-    # Peak = max sur tout l'historique fourni
-    peak_entry = max(history, key=lambda e: e.elo)
-    peak_age   = now - peak_entry.date
-    peak_age_days = peak_age.days
-
-    # Cas 1 : peak recent -> on le prend
-    if peak_age <= SIX_MONTHS:
-        return EffectiveEloResult(
-            elo=peak_entry.elo,
-            source="peak_recent",
-            peak=peak_entry.elo,
-            peak_age_days=peak_age_days,
-        )
-
-    # Cas 2 : peak vieux -> moyenne sur les 6 derniers mois
     six_months_ago = now - SIX_MONTHS
     recent = [e for e in history if e.date >= six_months_ago]
 
     if not recent:
-        # Cas 3 : aucun match recent -> peak en fallback
         return EffectiveEloResult(
-            elo=peak_entry.elo,
-            source="peak_fallback",
-            peak=peak_entry.elo,
-            peak_age_days=peak_age_days,
+            elo=fallback,
+            source="no_recent_history",
+            peak=0,
+            peak_age_days=None,
         )
 
-    avg = round(sum(e.elo for e in recent) / len(recent))
+    peak_entry = max(recent, key=lambda e: e.elo)
     return EffectiveEloResult(
-        elo=int(avg),
-        source="average_6m",
+        elo=peak_entry.elo,
+        source="peak_6m",
         peak=peak_entry.elo,
-        peak_age_days=peak_age_days,
+        peak_age_days=(now - peak_entry.date).days,
     )

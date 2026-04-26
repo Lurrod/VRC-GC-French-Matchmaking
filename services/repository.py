@@ -73,11 +73,15 @@ def link_riot_account(
     riot_tag: str,
     riot_region: str,
     puuid: str,
-    effective_elo: int,
     peak_elo: int,
     source: str,
 ) -> None:
-    """Enregistre ou met a jour le lien Discord <-> Riot."""
+    """Enregistre ou met a jour le lien Discord <-> Riot (metadata uniquement).
+
+    L'ELO de matchmaking est stockee dans `elo_<guild_id>` ; ce doc ne sert
+    plus qu'a (a) verifier qu'un joueur est lie pour rejoindre la queue,
+    (b) afficher le rang Riot de reference.
+    """
     from datetime import datetime, timezone
     get_riot_col(db, guild_id).update_one(
         {"_id": str(user_id)},
@@ -86,13 +90,67 @@ def link_riot_account(
             "riot_tag":      riot_tag,
             "riot_region":   riot_region,
             "puuid":         puuid,
-            "effective_elo": effective_elo,
             "peak_elo":      peak_elo,
             "source":        source,
             "fetched_at":    datetime.now(timezone.utc),
         }},
         upsert=True,
     )
+
+
+def seed_elo_with_riot_base(
+    db: Database,
+    guild_id: int | str,
+    user_id: int | str,
+    *,
+    riot_base_elo: int,
+    display_name: str,
+) -> tuple[int, bool]:
+    """Ajoute riot_base_elo a `elo_<guild>.elo`, **une seule fois** par joueur.
+
+    Atomique : protege contre la double comptabilisation si /link-riot est
+    rappele apres /unlink-riot. Le seeding est marque par le flag
+    `linked_once: True` dans le doc joueur.
+
+    Renvoie (elo_final, seeded_now). seeded_now=False si le joueur avait
+    deja ete seede une fois (ELO inchangee).
+    """
+    col = get_elo_col(db, guild_id)
+    uid = str(user_id)
+
+    # 1) Doc existant non encore seede : seed atomique sur l'existant
+    res = col.find_one_and_update(
+        {"_id": uid, "linked_once": {"$ne": True}},
+        {
+            "$inc": {"elo": int(riot_base_elo)},
+            "$set": {"name": display_name, "linked_once": True},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if res is not None:
+        return int(res["elo"]), True
+
+    # 2) Doc absent ou deja seede ?
+    existing = col.find_one({"_id": uid})
+    if existing is None:
+        # Premier link, aucun match anterieur : on cree le doc seede
+        col.insert_one({
+            "_id":         uid,
+            "name":        display_name,
+            "elo":         int(riot_base_elo),
+            "wins":        0,
+            "losses":      0,
+            "linked_once": True,
+        })
+        return int(riot_base_elo), True
+
+    # 3) Deja seede : ELO inchangee, on rafraichit juste le display_name
+    after = col.find_one_and_update(
+        {"_id": uid},
+        {"$set": {"name": display_name}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return (int(after["elo"]) if after else 0), False
 
 
 def get_riot_account(db: Database, guild_id: int | str, user_id: int | str) -> Mapping[str, Any] | None:

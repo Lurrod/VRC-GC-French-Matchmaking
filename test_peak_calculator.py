@@ -57,63 +57,62 @@ def test_empty_history_with_custom_fallback():
     assert r.elo == 1500
 
 
-# ── compute_effective_elo : peak recent ───────────────────────────
-def test_peak_recent_used_when_within_6_months():
+# ── compute_effective_elo : peak sur 6 mois ────────────────────────
+def test_peak_uses_max_of_6m_window():
     history = [
-        _entry(2000, days_ago=30),   # peak, recent
+        _entry(2000, days_ago=30),   # peak dans la fenetre
         _entry(1800, days_ago=60),
         _entry(1700, days_ago=90),
     ]
     r = compute_effective_elo(history, now=NOW)
     assert r.elo == 2000
-    assert r.source == "peak_recent"
+    assert r.source == "peak_6m"
     assert r.peak == 2000
     assert r.peak_age_days == 30
 
 
-def test_peak_just_under_6_months_still_recent():
-    """Edge case : peak il y a 179 jours est encore 'recent'."""
+def test_peak_just_under_6_months_counts():
+    """Edge case : match a 179 jours est dans la fenetre."""
     history = [
         _entry(2000, days_ago=179),
         _entry(1500, days_ago=10),
     ]
     r = compute_effective_elo(history, now=NOW)
     assert r.elo == 2000
-    assert r.source == "peak_recent"
+    assert r.source == "peak_6m"
 
 
-def test_peak_exactly_180_days_still_counts_as_recent():
-    """Edge case : peak il y a exactement 180 jours est dans la limite."""
+def test_peak_exactly_180_days_counts():
+    """Edge case : match a exactement 180 jours est dans la limite."""
     history = [_entry(2000, days_ago=180)]
     r = compute_effective_elo(history, now=NOW)
-    assert r.source == "peak_recent"
+    assert r.source == "peak_6m"
 
 
-# ── compute_effective_elo : peak vieux, moyenne 6 mois ────────────
-def test_old_peak_uses_average_of_last_6_months():
+def test_old_peak_ignored_uses_recent_peak():
+    """Un peak tres vieux est ignore : on prend le peak de la fenetre 6 mois."""
     history = [
-        _entry(2500, days_ago=400),   # peak tres vieux
-        _entry(1800, days_ago=30),    # recent
-        _entry(2000, days_ago=60),    # recent
-        _entry(1900, days_ago=90),    # recent
-        _entry(1700, days_ago=400),   # vieux, ignore
+        _entry(2500, days_ago=400),   # ignore (>6 mois)
+        _entry(1800, days_ago=30),
+        _entry(2000, days_ago=60),    # peak recent
+        _entry(1900, days_ago=90),
+        _entry(1700, days_ago=400),   # ignore
     ]
     r = compute_effective_elo(history, now=NOW)
-    # Moyenne des 3 recents : (1800 + 2000 + 1900) / 3 = 1900
-    assert r.elo == 1900
-    assert r.source == "average_6m"
-    assert r.peak == 2500
+    assert r.elo == 2000
+    assert r.source == "peak_6m"
+    assert r.peak == 2000
 
 
-def test_old_peak_no_recent_matches_falls_back_to_peak():
-    """Cas limite : peak vieux + 0 match recent -> on prend le peak."""
+def test_no_recent_matches_uses_fallback():
+    """Aucun match dans les 6 derniers mois -> fallback (MMR courant)."""
     history = [
         _entry(2500, days_ago=400),
         _entry(2000, days_ago=500),
     ]
-    r = compute_effective_elo(history, now=NOW)
-    assert r.elo == 2500
-    assert r.source == "peak_fallback"
+    r = compute_effective_elo(history, now=NOW, fallback=1500)
+    assert r.elo == 1500
+    assert r.source == "no_recent_history"
 
 
 # ── compute_effective_elo : robustesse ────────────────────────────
@@ -130,23 +129,10 @@ def test_history_in_arbitrary_order_works():
 def test_single_match_recent():
     r = compute_effective_elo([_entry(1500, days_ago=10)], now=NOW)
     assert r.elo == 1500
-    assert r.source == "peak_recent"
+    assert r.source == "peak_6m"
 
 
-def test_single_match_old():
-    r = compute_effective_elo([_entry(1500, days_ago=300)], now=NOW)
-    assert r.elo == 1500
-    assert r.source == "peak_fallback"
-
-
-def test_average_rounded_to_integer():
-    """Moyenne de 1500 + 1501 = 1500.5 -> arrondi a 1501 (banker's rounding) ou 1500."""
-    history = [
-        _entry(3000, days_ago=400),    # peak vieux
-        _entry(1500, days_ago=10),
-        _entry(1501, days_ago=20),
-    ]
-    r = compute_effective_elo(history, now=NOW)
-    # 1500.5 -> 1500 (banker's) ou 1501 selon impl ; on accepte les deux
-    assert r.elo in (1500, 1501)
-    assert r.source == "average_6m"
+def test_single_match_old_uses_fallback():
+    r = compute_effective_elo([_entry(1500, days_ago=300)], now=NOW, fallback=2000)
+    assert r.elo == 2000
+    assert r.source == "no_recent_history"

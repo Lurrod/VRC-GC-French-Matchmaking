@@ -4,9 +4,14 @@ Cog V2 : association compte Discord <-> compte Riot.
 Commandes :
   /link-riot riot_id:Pseudo#TAG     (region forcee a EU)
   /unlink-riot
-  /refresh-elo                      (cooldown 1h via cache HenrikDev)
 
-Restriction serveur : peak elo >= Immortal 1 (2400). Sinon le link est refuse.
+Aucun gate-keeping : la verification du rang des nouveaux membres est
+faite manuellement a l'entree sur le serveur Discord.
+
+Le link Riot ne sert qu'a (1) marquer le joueur comme lie (peut rejoindre
+la queue) et (2) seeder l'ELO de depart dans `elo_<guild_id>`.
+Apres le seed, l'ELO Riot n'a plus aucun impact : seuls les wins/losses
+du serveur (elo_updater apres validation de match) modifient l'ELO.
 """
 
 from __future__ import annotations
@@ -18,8 +23,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from services import repository
-from services.elo_calc import IMMORTAL_FLOOR_ELO
-from services.elo_mapping import elo_to_tier_name
 from services.peak_calculator import (
     MatchEntry,
     compute_effective_elo,
@@ -44,7 +47,7 @@ class RiotLinkCog(commands.Cog):
         self.riot_client = riot_client
 
     # ── /link-riot ────────────────────────────────────────────────
-    @app_commands.command(name="link-riot", description="Lie ton compte Discord a ton compte Riot (EU, Immortal+ requis)")
+    @app_commands.command(name="link-riot", description="Lie ton compte Discord a ton compte Riot (EU)")
     @app_commands.describe(
         riot_id="Ton Riot ID au format Pseudo#TAG (ex: Player#EUW)",
     )
@@ -86,18 +89,18 @@ class RiotLinkCog(commands.Cog):
             fallback=mmr.elo,
         )
 
-        # 3b) Restriction Immortal+ : peak (history) ou MMR courant doit etre Immortal+
-        max_observed = max(result.peak, mmr.elo)
-        if max_observed < IMMORTAL_FLOOR_ELO:
-            tier = elo_to_tier_name(max_observed) if max_observed > 0 else "Unrated"
-            await interaction.followup.send(
-                f"🚫 Ce serveur est reserve aux joueurs **Immortal 1+**.\n"
-                f"Ton meilleur rang detecte : **{tier}** ({max_observed}).",
-                ephemeral=True,
-            )
-            return
+        # 3) Seed atomique de l'ELO de depart (idempotent)
+        # Premier link : elo_<guild>.elo += result.elo (+ ELO bot deja accumulee)
+        # Re-link apres unlink : aucun changement (linked_once=True).
+        final_elo, seeded_now = repository.seed_elo_with_riot_base(
+            self.db,
+            interaction.guild_id,
+            interaction.user.id,
+            riot_base_elo=result.elo,
+            display_name=interaction.user.display_name,
+        )
 
-        # 4) Persister
+        # 4) Persister la metadata Riot (gate-keep + affichage uniquement)
         repository.link_riot_account(
             self.db,
             guild_id=interaction.guild_id,
@@ -106,7 +109,6 @@ class RiotLinkCog(commands.Cog):
             riot_tag=tag,
             riot_region=region,
             puuid=account.puuid,
-            effective_elo=result.elo,
             peak_elo=result.peak,
             source=result.source,
         )
@@ -120,9 +122,15 @@ class RiotLinkCog(commands.Cog):
         embed.add_field(name="Riot ID", value=f"**{name}#{tag}**", inline=True)
         embed.add_field(name="Region", value=region.upper(),       inline=True)
         embed.add_field(name="Rang actuel", value=mmr.tier_name,   inline=True)
-        embed.add_field(name="Effective ELO", value=f"**{result.elo}**", inline=True)
-        embed.add_field(name="Peak", value=f"**{result.peak}**",   inline=True)
+        embed.add_field(name="ELO serveur", value=f"**{final_elo}**", inline=True)
+        embed.add_field(name="Peak Riot", value=f"**{result.peak}**", inline=True)
         embed.add_field(name="Source", value=_explain_source(result.source), inline=True)
+        if not seeded_now:
+            embed.add_field(
+                name="ℹ️ Note",
+                value="ELO inchangee (deja initialisee lors d'un link precedent).",
+                inline=False,
+            )
         embed.set_footer(text=f"Discord: {interaction.user.display_name}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -137,75 +145,11 @@ class RiotLinkCog(commands.Cog):
         else:
             await interaction.response.send_message("ℹ️ Aucun compte Riot lie.", ephemeral=True)
 
-    # ── /refresh-elo ──────────────────────────────────────────────
-    @app_commands.command(name="refresh-elo", description="Recalcule ton effective ELO (peut prendre 1h via cache)")
-    async def refresh_elo(self, interaction: discord.Interaction) -> None:
-        doc = repository.get_riot_account(
-            self.db, interaction.guild_id, interaction.user.id,
-        )
-        if not doc:
-            await interaction.response.send_message(
-                "❌ Tu n'as pas de compte Riot lie. Utilise `/link-riot` d'abord.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        name   = doc["riot_name"]
-        tag    = doc["riot_tag"]
-        region = doc["riot_region"]
-
-        # Force le cache a se vider pour cet utilisateur (sinon valeur stale)
-        self.riot_client.clear_cache()
-
-        try:
-            mmr     = self.riot_client.get_current_mmr(region, name, tag)
-            history = self.riot_client.get_mmr_history(region, name, tag)
-        except RiotApiError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return
-
-        entries = [MatchEntry(elo=h.elo, date=h.date) for h in history]
-        result  = compute_effective_elo(
-            entries,
-            now=datetime.now(timezone.utc),
-            fallback=mmr.elo,
-        )
-
-        repository.link_riot_account(
-            self.db,
-            guild_id=interaction.guild_id,
-            user_id=interaction.user.id,
-            riot_name=name,
-            riot_tag=tag,
-            riot_region=region,
-            puuid=doc.get("puuid", ""),
-            effective_elo=result.elo,
-            peak_elo=result.peak,
-            source=result.source,
-        )
-
-        old_elo = doc.get("effective_elo", 0)
-        delta   = result.elo - old_elo
-        sign    = "+" if delta >= 0 else ""
-        embed = discord.Embed(
-            title="🔄 Effective ELO mis a jour",
-            color=0x3498db,
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.add_field(name="Avant", value=str(old_elo), inline=True)
-        embed.add_field(name="Apres", value=f"**{result.elo}**", inline=True)
-        embed.add_field(name="Delta", value=f"{sign}{delta}", inline=True)
-        embed.add_field(name="Source", value=_explain_source(result.source), inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-
 def _explain_source(source: str) -> str:
     return {
-        "peak_recent":    "🏔️ Peak elo (<6 mois)",
-        "average_6m":     "📊 Moyenne 6 derniers mois",
-        "peak_fallback":  "🏔️ Peak (aucun match recent)",
-        "empty":          "❓ Aucun historique",
+        "peak_6m":            "🏔️ Peak ELO sur les 6 derniers mois",
+        "no_recent_history":  "📭 Aucun match recent (MMR courant utilise)",
+        "empty":              "❓ Aucun historique",
     }.get(source, source)
 
 

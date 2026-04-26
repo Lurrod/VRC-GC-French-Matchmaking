@@ -56,17 +56,22 @@ def _fake_interaction(guild, user=None):
 
 
 def _seed_full_queue(db, guild_id: int, channel_id: int = 100):
-    """Cree la queue active + 10 comptes Riot lies."""
+    """Cree la queue active + 10 comptes Riot lies + leur ELO serveur."""
     repository.setup_active_queue(db, guild_id=guild_id, channel_id=channel_id, message_id=999)
+    elo_col = repository.get_elo_col(db, guild_id)
     for i in range(10):
         repository.link_riot_account(
             db, guild_id=guild_id, user_id=i,
             riot_name=f"P{i}", riot_tag="EUW", riot_region="eu",
             puuid=f"pu{i}",
-            effective_elo=1500 + i * 50,
             peak_elo=1500 + i * 50,
             source="peak_recent",
         )
+        elo_col.insert_one({
+            "_id": str(i), "name": f"P{i}",
+            "elo": 1500 + i * 50, "wins": 0, "losses": 0,
+            "linked_once": True,
+        })
         repository.add_player_to_queue(db, guild_id=guild_id, user_id=i)
     return repository.get_active_queue(db, guild_id=guild_id)
 

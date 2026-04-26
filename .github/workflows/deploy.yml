@@ -1,0 +1,96 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vrc-bot
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Run tests
+        run: pytest -v
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.SSH_PORT || '22' }}" -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Rsync project to server
+        run: |
+          rsync -avz --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='__pycache__/' \
+            --exclude='.pytest_cache/' \
+            --exclude='venv/' \
+            --exclude='.venv/' \
+            --exclude='logs/' \
+            --exclude='.env' \
+            --exclude='.env.example' \
+            --exclude='test_*.py' \
+            --exclude='conftest.py' \
+            --exclude='pytest.ini' \
+            --exclude='requirements-test.txt' \
+            --exclude='preview_leaderboard.py' \
+            --exclude='seed_users.py' \
+            --exclude='leaderboard_preview/' \
+            --exclude='idées.txt' \
+            --exclude='FONCTIONNALITES.txt' \
+            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT || '22' }}" \
+            ./ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOY_PATH }}/"
+
+      - name: Install dependencies and reload PM2
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "${{ secrets.SSH_PORT || '22' }}" \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "${{ secrets.DEPLOY_PATH }}"
+
+          if [ ! -d venv ]; then
+            python3.12 -m venv venv
+          fi
+
+          # shellcheck disable=SC1091
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+          mkdir -p logs
+
+          if pm2 describe vrc-bot >/dev/null 2>&1; then
+            pm2 reload ecosystem.config.js --update-env
+          else
+            pm2 start ecosystem.config.js
+          fi
+          pm2 save
+          REMOTE

@@ -132,49 +132,49 @@ async def test_slash_win_5_players_distributes_elo_v2():
         assert doc["wins"] == 1
 
 
-async def test_slash_win_uses_riot_avg_when_linked():
-    """Avec joueurs lies a Riot, le gain est proportionnel a leur avg effective_elo."""
+async def test_slash_win_uses_server_avg_when_seeded():
+    """Le gain est proportionnel a l'avg de l'ELO serveur (elo_<guild>.elo)."""
     import bot as bot_module
-    from services import repository
 
     admin = _fake_member(1, "Admin", manage_guild=True)
     targets = [_fake_member(20 + i, f"R{i}") for i in range(2)]
     guild = _fake_guild(42, members=[admin] + targets)
     inter = _fake_interaction(admin, guild)
 
-    # Lie les 2 joueurs avec un avg de 3000 (Radiant) -> gain = 25
-    for i, t in enumerate(targets):
-        repository.link_riot_account(
-            bot_module.db, guild_id=42, user_id=t.id,
-            riot_name=f"R{i}", riot_tag="EUW", riot_region="eu",
-            puuid=f"pu-{t.id}", effective_elo=3000, peak_elo=3000, source="peak_recent",
-        )
+    # Seed une ELO serveur de 3000 (Radiant) -> gain = 25
+    col = bot_module.get_elo_col(42)
+    for t in targets:
+        col.insert_one({
+            "_id": str(t.id), "name": t.display_name,
+            "elo": 3000, "wins": 0, "losses": 0, "linked_once": True,
+        })
 
     await bot_module.win.callback(inter, joueur1=targets[0], joueur2=targets[1])
 
-    col = bot_module.get_elo_col(42)
     for t in targets:
         doc = col.find_one({"_id": str(t.id)})
-        assert doc["elo"] == 25, f"{t.display_name}: attendu 25 (avg 3000 Radiant), recu {doc['elo']}"
+        assert doc["elo"] == 3025, f"{t.display_name}: attendu 3025 (3000 + 25), recu {doc['elo']}"
 
 
 # ── /lose ─────────────────────────────────────────────────────────
 async def test_slash_lose_floors_at_zero():
     import bot as bot_module
 
-    admin = _fake_member(1, "Admin", manage_guild=True)
-    target = _fake_member(2, "Bob")
-    guild = _fake_guild(42, members=[admin, target])
+    admin   = _fake_member(1, "Admin", manage_guild=True)
+    target  = _fake_member(2, "Bob")
+    partner = _fake_member(3, "Boost")  # tire l'avg vers le haut
+    guild = _fake_guild(42, members=[admin, target, partner])
     inter = _fake_interaction(admin, guild)
 
     col = bot_module.get_elo_col(42)
-    col.insert_one({"_id": "2", "name": "Bob", "elo": 5, "wins": 0, "losses": 0})
+    col.insert_one({"_id": "2", "name": "Bob",   "elo": 5,    "wins": 0, "losses": 0})
+    col.insert_one({"_id": "3", "name": "Boost", "elo": 2995, "wins": 0, "losses": 0})
 
-    # Sans Riot link : fallback 1500 -> loss=10, ELO 5 -> max(0, -5) = 0
-    await bot_module.lose.callback(inter, joueur1=target)
+    # avg(5, 2995) = 1500 -> loss = round(10 * 1500/2400) = 6. Bob: max(0, 5 - 6) = 0
+    await bot_module.lose.callback(inter, joueur1=target, joueur2=partner)
 
-    doc = col.find_one({"_id": "2"})
-    assert doc["elo"] == 0
+    assert col.find_one({"_id": "2"})["elo"] == 0
+    assert col.find_one({"_id": "3"})["elo"] == 2989
 
 
 # ── /leaderboard + LeaderboardView (le bug initial) ───────────────

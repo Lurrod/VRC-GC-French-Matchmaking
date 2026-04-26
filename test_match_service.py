@@ -14,10 +14,10 @@ from services.match_service import (
 from services.team_balancer import Player
 
 
-def _riot_doc(elo: int, name: str = "X") -> dict:
+def _riot_doc(name: str = "X") -> dict:
     return {
         "riot_name": name, "riot_tag": "EUW", "riot_region": "eu",
-        "puuid": "p", "effective_elo": elo, "peak_elo": elo, "source": "peak_recent",
+        "puuid": "p", "peak_elo": 2500, "source": "peak_recent",
     }
 
 
@@ -25,8 +25,9 @@ def _riot_doc(elo: int, name: str = "X") -> dict:
 def test_build_players_uses_member_display_name():
     players = build_players(
         player_ids=["1", "2"],
-        riot_accounts={"1": _riot_doc(1500), "2": _riot_doc(2000)},
+        riot_accounts={"1": _riot_doc(), "2": _riot_doc()},
         member_names={"1": "Jet", "2": "Sage"},
+        bot_elos={"1": 1500, "2": 2000},
     )
     assert len(players) == 2
     assert players[0].id == 1 and players[0].name == "Jet" and players[0].elo == 1500
@@ -36,10 +37,11 @@ def test_build_players_uses_member_display_name():
 def test_build_players_skips_unlinked():
     players = build_players(
         player_ids=["1", "2", "3"],
-        riot_accounts={"1": _riot_doc(1500), "3": _riot_doc(1700)},
+        riot_accounts={"1": _riot_doc(), "3": _riot_doc()},
         member_names={"1": "A", "2": "B", "3": "C"},
+        bot_elos={"1": 1500, "2": 999, "3": 1700},
     )
-    # Joueur 2 sans compte Riot -> ignore
+    # Joueur 2 sans compte Riot -> ignore (meme s'il a une ELO bot)
     assert len(players) == 2
     assert {p.id for p in players} == {1, 3}
 
@@ -47,10 +49,33 @@ def test_build_players_skips_unlinked():
 def test_build_players_falls_back_to_riot_name():
     players = build_players(
         player_ids=["1"],
-        riot_accounts={"1": _riot_doc(1500, name="RiotName")},
+        riot_accounts={"1": _riot_doc(name="RiotName")},
         member_names={},  # aucun member resolu
+        bot_elos={"1": 1500},
     )
     assert players[0].name == "RiotName"
+
+
+def test_build_players_uses_bot_elo_not_riot():
+    """L'ELO de matchmaking provient de elo_<guild>, jamais des riot_accounts."""
+    players = build_players(
+        player_ids=["1"],
+        riot_accounts={"1": _riot_doc()},   # peak_elo 2500 ignore
+        member_names={"1": "A"},
+        bot_elos={"1": 1234},               # source de verite
+    )
+    assert players[0].elo == 1234
+
+
+def test_build_players_zero_when_no_bot_elo():
+    """Si elo_<guild> n'a pas de doc pour le joueur, ELO = 0."""
+    players = build_players(
+        player_ids=["1"],
+        riot_accounts={"1": _riot_doc()},
+        member_names={"1": "A"},
+        bot_elos={},
+    )
+    assert players[0].elo == 0
 
 
 # ── plan_match ────────────────────────────────────────────────────

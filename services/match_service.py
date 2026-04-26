@@ -34,18 +34,23 @@ def build_players(
     player_ids:     Sequence[str],
     riot_accounts:  dict[str, dict],
     member_names:   dict[str, str],
+    bot_elos:       dict[str, int] | None = None,
 ) -> list[Player]:
     """
-    Construit les Player en croisant queue + Riot + display_names.
+    Construit les Player en croisant queue + Riot + ELO serveur + display_names.
 
     Args:
         player_ids:    IDs Discord (str) en queue
-        riot_accounts: dict[user_id_str -> doc Riot] (effective_elo dedans)
+        riot_accounts: dict[user_id_str -> doc Riot] (gate-keep uniquement)
         member_names:  dict[user_id_str -> display_name]
+        bot_elos:      dict[user_id_str -> ELO serveur (elo_<guild>.elo)].
+                       Source de verite pour le matchmaking.
 
-    Joueur sans compte Riot lie -> ignore (le cog rejettera la formation
-    si le total tombe sous 10).
+    Joueur sans compte Riot lie -> ignore (queue rejettera < 10).
+    L'ELO utilisee pour le balancing est `bot_elos[uid]` (ELO serveur
+    seedee au /link-riot et mise a jour apres chaque match valide).
     """
+    bot_elos = bot_elos or {}
     out: list[Player] = []
     for uid in player_ids:
         riot = riot_accounts.get(uid)
@@ -55,7 +60,7 @@ def build_players(
         out.append(Player(
             id=int(uid),
             name=name,
-            elo=int(riot.get("effective_elo", 0)),
+            elo=int(bot_elos.get(uid, 0)),
         ))
     return out
 

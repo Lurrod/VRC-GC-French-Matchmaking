@@ -53,8 +53,12 @@ def _seed_riot_link(db, guild_id: int, user_id: int, elo: int = 1500):
     repository.link_riot_account(
         db, guild_id=guild_id, user_id=user_id,
         riot_name=f"P{user_id}", riot_tag="EUW", riot_region="eu",
-        puuid=f"pu-{user_id}", effective_elo=elo, peak_elo=elo, source="peak_recent",
+        puuid=f"pu-{user_id}", peak_elo=elo, source="peak_recent",
     )
+    repository.get_elo_col(db, guild_id).insert_one({
+        "_id": str(user_id), "name": f"P{user_id}",
+        "elo": elo, "wins": 0, "losses": 0, "linked_once": True,
+    })
 
 
 def _seed_active_queue(db, guild_id: int = 42):

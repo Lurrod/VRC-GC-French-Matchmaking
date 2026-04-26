@@ -123,23 +123,20 @@ async def test_lose_floors_elo_at_zero(discord_bot, fake_guild):
     """Un joueur a 5 ELO qui perd ne doit pas descendre sous 0."""
     import bot as bot_module
 
-    admin = fake_guild.members[0]
-    target = fake_guild.members[1]
+    admin   = fake_guild.members[0]
+    target  = fake_guild.members[1]
+    partner = fake_guild.members[2]   # tire l'avg vers le haut pour declencher loss>0
     perms = discord.Permissions()
     perms.update(manage_guild=True)
     admin_role = await fake_guild.create_role(name="Admin", permissions=perms)
     await admin.add_roles(admin_role)
 
     col = bot_module.get_elo_col(fake_guild.id)
-    col.insert_one({
-        "_id": str(target.id),
-        "name": target.display_name,
-        "elo": 5,
-        "wins": 0,
-        "losses": 0,
-    })
+    col.insert_one({"_id": str(target.id),  "name": target.display_name,  "elo": 5,    "wins": 0, "losses": 0})
+    col.insert_one({"_id": str(partner.id), "name": partner.display_name, "elo": 2995, "wins": 0, "losses": 0})
 
-    await dpytest.message(f"!lose {target.mention}")
+    # avg(5, 2995) = 1500 -> loss = 10 -> max(0, 5-10) = 0 pour target
+    await dpytest.message(f"!lose {target.mention} {partner.mention}")
 
     doc = col.find_one({"_id": str(target.id)})
     assert doc["elo"] == 0, f"ELO doit etre clampe a 0, recu {doc['elo']}"

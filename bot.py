@@ -162,12 +162,12 @@ async def bypass(interaction: discord.Interaction, role: discord.Role):
     embed.set_footer(text=f"Configuré par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
-# ── Helper V2 : effective ELO Riot avec fallback ──────────────
+# ── Helper V2 : ELO serveur avec fallback ──────────────────────
 def _match_elo_for_member(guild_id: int, user_id: int) -> int:
-    """Renvoie effective_elo Riot du joueur, ou ELO_REFERENCE (1500) si pas lié."""
-    riot = repository.get_riot_account(db, guild_id, user_id)
-    if riot and riot.get("effective_elo") is not None:
-        return int(riot["effective_elo"])
+    """Renvoie l'ELO serveur du joueur (elo_<guild>.elo), ou ELO_REFERENCE si absente."""
+    doc = repository.get_elo_col(db, guild_id).find_one({"_id": str(user_id)})
+    if doc and doc.get("elo") is not None:
+        return int(doc["elo"])
     return elo_calc.ELO_REFERENCE
 
 
