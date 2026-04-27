@@ -600,7 +600,6 @@ async def bypass_error(interaction: discord.Interaction, error):
         await interaction.response.send_message("Seuls les administrateurs peuvent configurer le bypass.", ephemeral=True)
 
 # ── Système de Queue ───────────────────────────────────────────
-MATCH_STAFF_ROLE = "Match Staff"
 queue_locks = {}
 queue_join_times = {}  # {guild_id: {member_id: timestamp}}
 
@@ -643,28 +642,14 @@ async def on_voice_state_update(member, before, after):
         print(f"[queue] Total en queue : {len(unique_members)}/{QUEUE_SIZE}")
         if len(unique_members) < QUEUE_SIZE:
             return
-        staff_role = discord.utils.find(lambda r: r.name.lower() == MATCH_STAFF_ROLE.lower(), guild.roles)
-        if not staff_role:
-            print(f"[queue] Role Match Staff introuvable !")
-            return
-        staff_in_queue  = [m for m in unique_members if staff_role in m.roles]
-        normal_in_queue = [m for m in unique_members if staff_role not in m.roles]
-        print(f"[queue] Staff en queue : {len(staff_in_queue)}, Joueurs : {len(normal_in_queue)}")
-        if not staff_in_queue:
-            print(f"[queue] Pas de Match Staff en queue, on attend...")
-            return
 
         # Trie tous les membres par ordre d'arrivée (premier arrivé = prioritaire)
         join_times = queue_join_times.get(guild.id, {})
         def get_join_time(m):
             return join_times.get(m.id, datetime.now())
 
-        staff_select  = sorted(staff_in_queue, key=get_join_time)[:1]
-        others        = [m for m in unique_members if m != staff_select[0]]
-        others_sorted = sorted(others, key=get_join_time)
-        others_select = others_sorted[:QUEUE_SIZE - 1]
-        to_move       = staff_select + others_select
-        print(f"[queue] Selection : {len(staff_select)} staff + {len(others_select)} joueurs = {len(to_move)}")
+        to_move = sorted(unique_members, key=get_join_time)[:QUEUE_SIZE]
+        print(f"[queue] Selection : {len(to_move)} joueurs")
         if len(to_move) < QUEUE_SIZE:
             print(f"[queue] Pas assez de joueurs ({len(to_move)}/{QUEUE_SIZE})")
             return
@@ -733,8 +718,7 @@ async def on_voice_state_update(member, before, after):
             if unknown:
                 embed.add_field(name="Autres", value="\n".join([f"- {m.mention}" for m in unknown]), inline=False)
             embed.set_footer(text=f"Deplaces vers {match_category_name} / Waiting Match")
-            staff_ping = staff_in_queue[0].mention if staff_in_queue else ""
-            await prep_channel.send(content=f"{staff_ping} Un match vient de commencer !", embed=embed)
+            await prep_channel.send(content="Un match vient de commencer !", embed=embed)
 
 # ── Commandes prefix ───────────────────────────────────────────
 @bot.command(name="leaderboard")
