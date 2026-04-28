@@ -262,11 +262,11 @@ def test_build_embed_from_doc_contested():
 async def test_timeout_marks_pending_match_contested():
     import bot as bot_module
 
-    # Crée un match il y a 10 minutes
+    # Crée un match expiré (au-delà du timeout)
     match_id = _seed_match(bot_module.db)
     bot_module.db[f"matches_42"].update_one(
         {"_id": match_id},
-        {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(minutes=10)}},
+        {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5)}},
     )
 
     channel = MagicMock()
@@ -358,7 +358,7 @@ async def test_timeout_falls_back_when_no_admin_role():
     match_id = _seed_match(bot_module.db)
     bot_module.db[f"matches_42"].update_one(
         {"_id": match_id},
-        {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(minutes=10)}},
+        {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5)}},
     )
 
     channel = MagicMock()
