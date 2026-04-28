@@ -42,7 +42,7 @@ from services.match_service import (
 VOTE_A_BTN_ID:    Final[str] = "vote_v2:a"
 VOTE_B_BTN_ID:    Final[str] = "vote_v2:b"
 MAJORITY_THRESHOLD: Final[int] = 7
-VOTE_TIMEOUT_MINUTES: Final[int] = 5
+VOTE_TIMEOUT_MINUTES: Final[int] = 60
 
 # Roles cibles pour le ping admin (premier trouve gagne)
 ADMIN_ROLE_NAMES: Final[tuple[str, ...]] = ("Admin", "Match Staff", "Administrateur")
