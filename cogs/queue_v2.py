@@ -155,11 +155,18 @@ class QueueView(discord.ui.View):
         label="Rejoindre", style=discord.ButtonStyle.success, custom_id=JOIN_BTN_ID,
     )
     async def join_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        # Acquitte tout de suite : sous contention du lock par-guild, le token
+        # d'interaction (3s) peut expirer avant qu'on reponde -> 10062.
+        try:
+            await inter.response.defer()
+        except discord.NotFound:
+            return
+
         async with self._lock(inter.guild_id):
             # 1) compte Riot lie ?
             riot = repository.get_riot_account(self.db, inter.guild_id, inter.user.id)
             if not riot:
-                await inter.response.send_message(
+                await inter.followup.send(
                     "❌ Lie d'abord ton compte Riot avec `/link-riot Pseudo#TAG`.",
                     ephemeral=True,
                 )
@@ -170,7 +177,7 @@ class QueueView(discord.ui.View):
                 self.db, inter.guild_id, inter.user.id,
             )
             if not res.success:
-                await inter.response.send_message(_join_error_message(res.reason), ephemeral=True)
+                await inter.followup.send(_join_error_message(res.reason), ephemeral=True)
                 return
 
             # 3) si la queue est maintenant pleine -> on ferme + trigger formation
@@ -182,7 +189,7 @@ class QueueView(discord.ui.View):
 
             # 4) edit du message
             embed = build_queue_embed(queue_doc, inter.guild)
-            await inter.response.edit_message(embed=embed, view=self)
+            await inter.edit_original_response(embed=embed, view=self)
 
             # 4b) auto-move dans le salon vocal "Waiting Room"
             move_notice = None
@@ -208,15 +215,20 @@ class QueueView(discord.ui.View):
         label="Quitter", style=discord.ButtonStyle.danger, custom_id=LEAVE_BTN_ID,
     )
     async def leave_btn(self, inter: discord.Interaction, button: discord.ui.Button):
+        try:
+            await inter.response.defer()
+        except discord.NotFound:
+            return
+
         async with self._lock(inter.guild_id):
             res = repository.remove_player_from_queue(
                 self.db, inter.guild_id, inter.user.id,
             )
             if not res.success:
-                await inter.response.send_message(_leave_error_message(res.reason), ephemeral=True)
+                await inter.followup.send(_leave_error_message(res.reason), ephemeral=True)
                 return
             embed = build_queue_embed(res.queue, inter.guild)
-            await inter.response.edit_message(embed=embed, view=self)
+            await inter.edit_original_response(embed=embed, view=self)
             if isinstance(inter.user, discord.Member):
                 await _revoke_queue_role(inter.user)
 

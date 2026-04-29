@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest test_queue_v2.py -x -q)",
+      "Bash(python -m pytest -q)"
+    ]
+  }
+}

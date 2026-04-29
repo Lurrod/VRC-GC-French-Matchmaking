@@ -46,6 +46,7 @@ def _fake_interaction(user, guild_id: int = 42):
     inter.response.defer = AsyncMock()
     inter.followup = MagicMock()
     inter.followup.send = AsyncMock()
+    inter.edit_original_response = AsyncMock()
     inter.message = MagicMock()
     inter.message.id = 999
     return inter
@@ -175,11 +176,11 @@ async def test_join_without_riot_account_refuses():
 
     await view.join_btn.callback(inter)
 
-    inter.response.send_message.assert_awaited_once()
-    args, kwargs = inter.response.send_message.call_args
+    inter.followup.send.assert_awaited_once()
+    args, kwargs = inter.followup.send.call_args
     assert "Riot" in args[0]
     assert kwargs.get("ephemeral") is True
-    inter.response.edit_message.assert_not_awaited()
+    inter.edit_original_response.assert_not_awaited()
 
 
 async def test_join_no_active_queue_refuses():
@@ -189,7 +190,7 @@ async def test_join_no_active_queue_refuses():
     inter = _fake_interaction(_fake_member(1))
 
     await view.join_btn.callback(inter)
-    args, _ = inter.response.send_message.call_args
+    args, _ = inter.followup.send.call_args
     assert "Aucune queue" in args[0]
 
 
@@ -202,8 +203,8 @@ async def test_join_success_updates_message():
 
     await view.join_btn.callback(inter)
 
-    inter.response.edit_message.assert_awaited_once()
-    embed = inter.response.edit_message.call_args.kwargs["embed"]
+    inter.edit_original_response.assert_awaited_once()
+    embed = inter.edit_original_response.call_args.kwargs["embed"]
     assert "1/10" in embed.title
 
 
@@ -235,7 +236,7 @@ async def test_join_already_in_refuses():
     inter = _fake_interaction(_fake_member(1))
     await view.join_btn.callback(inter)
 
-    args, _ = inter.response.send_message.call_args
+    args, _ = inter.followup.send.call_args
     assert "deja dans la queue" in args[0]
 
 
@@ -277,7 +278,7 @@ async def test_join_when_queue_forming_refuses():
     inter = _fake_interaction(_fake_member(1))
     await view.join_btn.callback(inter)
 
-    args, _ = inter.response.send_message.call_args
+    args, _ = inter.followup.send.call_args
     assert "fermee" in args[0]
 
 
@@ -289,7 +290,7 @@ async def test_leave_when_not_in_queue_refuses():
     inter = _fake_interaction(_fake_member(1))
 
     await view.leave_btn.callback(inter)
-    args, _ = inter.response.send_message.call_args
+    args, _ = inter.followup.send.call_args
     assert "n'es pas dans la queue" in args[0]
 
 
@@ -303,8 +304,8 @@ async def test_leave_success_updates_message():
     inter = _fake_interaction(_fake_member(1))
     await view.leave_btn.callback(inter)
 
-    inter.response.edit_message.assert_awaited_once()
-    embed = inter.response.edit_message.call_args.kwargs["embed"]
+    inter.edit_original_response.assert_awaited_once()
+    embed = inter.edit_original_response.call_args.kwargs["embed"]
     assert "0/10" in embed.title
 
 
