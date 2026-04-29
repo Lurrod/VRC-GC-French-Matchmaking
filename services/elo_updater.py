@@ -20,30 +20,44 @@ VALIDATED_B: Final[str] = "validated_b"
 
 @dataclass(frozen=True)
 class PlayerEloChange:
-    user_id: str
-    name:    str
-    old_elo: int
-    new_elo: int
-    delta:   int
-    win:     bool
+    user_id:    str
+    name:       str
+    old_elo:    int
+    new_elo:    int
+    delta:      int
+    win:        bool
+    multiplier: float = 1.0
 
 
 @dataclass(frozen=True)
 class MatchEloOutcome:
-    avg_elo: int
-    gain:    int
-    loss:    int
-    changes: tuple[PlayerEloChange, ...]
+    avg_elo:     int
+    gain:        int
+    loss:        int
+    changes:     tuple[PlayerEloChange, ...]
+    weighted:    bool = False  # True si appel avec multipliers Henrik
 
 
-def apply_match_validation(db, guild_id: int | str, match_doc: dict) -> MatchEloOutcome:
+def apply_match_validation(
+    db,
+    guild_id: int | str,
+    match_doc: dict,
+    multipliers: dict[str, float] | None = None,
+) -> MatchEloOutcome:
     """
-    Distribue +gain aux gagnants et -loss aux perdants.
+    Distribue les ELO en une seule passe.
+
+    Si `multipliers` est fourni (dict user_id -> mult Henrik/ACS), pondere :
+      - gagnant : delta = +round(base_gain * mult)
+      - perdant : delta = -round(base_loss * (2 - mult))
+    Si un joueur est absent du dict, mult=1.0 (delta plat).
+    Si `multipliers` est None, comportement plat pour tout le monde.
 
     Args:
-        db:        Database mongomock/pymongo
-        guild_id:  guild Discord
-        match_doc: doc match avec `team_a`, `team_b`, `status` validated_a/b
+        db:          Database mongomock/pymongo
+        guild_id:    guild Discord
+        match_doc:   doc match avec `team_a`, `team_b`, `status` validated_a/b
+        multipliers: dict user_id (str) -> multiplicateur ACS (~0.7..1.3)
 
     Raises:
         ValueError si status != validated_a/b
@@ -57,29 +71,38 @@ def apply_match_validation(db, guild_id: int | str, match_doc: dict) -> MatchElo
     else:
         winners, losers = match_doc["team_b"], match_doc["team_a"]
 
-    avg_elo    = elo_calc.compute_team_avg_elo(winners + losers)
-    gain, loss = elo_calc.compute_match_elo_change(avg_elo)
+    avg_elo              = elo_calc.compute_team_avg_elo(winners + losers)
+    base_gain, base_loss = elo_calc.compute_match_elo_change(avg_elo)
 
+    mults    = multipliers or {}
+    weighted = multipliers is not None
     elo_col  = repository.get_elo_col(db, guild_id)
     changes: list[PlayerEloChange] = []
 
     for p in winners:
-        change = _apply_player(elo_col, p, delta=+gain, win=True)
-        changes.append(change)
+        uid   = str(p["id"])
+        mult  = float(mults.get(uid, 1.0))
+        delta = round(base_gain * mult)
+        changes.append(_apply_player(elo_col, p, delta=+delta, win=True, multiplier=mult))
 
     for p in losers:
-        change = _apply_player(elo_col, p, delta=-loss, win=False)
-        changes.append(change)
+        uid   = str(p["id"])
+        mult  = float(mults.get(uid, 1.0))
+        delta = round(base_loss * (2.0 - mult))
+        changes.append(_apply_player(elo_col, p, delta=-delta, win=False, multiplier=mult))
 
     return MatchEloOutcome(
         avg_elo=avg_elo,
-        gain=gain,
-        loss=loss,
+        gain=base_gain,
+        loss=base_loss,
         changes=tuple(changes),
+        weighted=weighted,
     )
 
 
-def _apply_player(col, player: dict, *, delta: int, win: bool) -> PlayerEloChange:
+def _apply_player(
+    col, player: dict, *, delta: int, win: bool, multiplier: float = 1.0,
+) -> PlayerEloChange:
     uid  = str(player["id"])
     name = player.get("name", uid)
     doc  = col.find_one({"_id": uid})
@@ -111,4 +134,5 @@ def _apply_player(col, player: dict, *, delta: int, win: bool) -> PlayerEloChang
         new_elo=new_elo,
         delta=new_elo - old_elo,
         win=win,
+        multiplier=multiplier,
     )

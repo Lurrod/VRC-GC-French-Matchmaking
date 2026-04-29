@@ -339,3 +339,36 @@ def set_match_status(
     if status in ("validated_a", "validated_b"):
         update["validated_at"] = datetime.now(timezone.utc)
     get_matches_col(db, guild_id).update_one({"_id": match_id}, {"$set": update})
+
+
+def find_validated_unverified(
+    db: Database, guild_id: int | str, cutoff_dt,
+) -> list[Mapping[str, Any]]:
+    """Matches validated_a/b avec validated_at <= cutoff_dt et henrik_verified absent/false."""
+    return list(get_matches_col(db, guild_id).find({
+        "status":       {"$in": ["validated_a", "validated_b"]},
+        "validated_at": {"$lte": cutoff_dt},
+        "$or": [
+            {"henrik_verified": {"$exists": False}},
+            {"henrik_verified": False},
+        ],
+    }))
+
+
+def set_match_henrik_verified(
+    db: Database,
+    guild_id: int | str,
+    match_id: Any,
+    *,
+    found:       bool,
+    multipliers: dict[str, float] | None = None,
+) -> None:
+    update: dict[str, Any] = {
+        "henrik_verified": True,
+        "henrik_found":    bool(found),
+    }
+    if multipliers is not None:
+        update["henrik_multipliers"] = {str(k): float(v) for k, v in multipliers.items()}
+    get_matches_col(db, guild_id).update_one(
+        {"_id": match_id}, {"$set": update},
+    )

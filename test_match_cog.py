@@ -15,6 +15,10 @@ def _fake_member(member_id: int, name: str = "User"):
     m.id = member_id
     m.display_name = name
     m.mention = f"<@{member_id}>"
+    m.roles = []
+    m.guild = MagicMock(roles=[])
+    m.add_roles = AsyncMock()
+    m.remove_roles = AsyncMock()
     return m
 
 

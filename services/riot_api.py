@@ -68,6 +68,30 @@ class HistoricalMatch:
     mmr_change: int
 
 
+@dataclass(frozen=True)
+class MatchPlayerStats:
+    puuid:  str
+    name:   str
+    tag:    str
+    team:   str           # "Red" ou "Blue"
+    score:  int           # combat score total
+    kills:  int
+    deaths: int
+    assists: int
+
+
+@dataclass(frozen=True)
+class MatchSummary:
+    matchid:       str
+    mode:          str    # "Custom Game", "Competitive", etc.
+    map_name:      str
+    started_at:    datetime
+    rounds_played: int
+    players:       tuple[MatchPlayerStats, ...]
+    rounds_red:    int
+    rounds_blue:   int
+
+
 # ── Cache TTL simple ──────────────────────────────────────────────
 class _TTLCache:
     def __init__(self, ttl: int) -> None:
@@ -181,5 +205,65 @@ class HenrikDevClient:
             ))
         return out
 
+    def get_match_history(
+        self,
+        region: str,
+        name: str,
+        tag: str,
+        *,
+        size: int = 5,
+        mode: str | None = None,
+    ) -> list[MatchSummary]:
+        """Recupere les matchs recents d'un joueur. `mode` filtre cote API ('custom', etc.)."""
+        if region not in VALID_REGIONS:
+            raise ValueError(f"Region invalide : {region}")
+        path = f"/v3/matches/{region}/{name}/{tag}?size={size}"
+        if mode:
+            path += f"&filter={mode}"
+        data = self._get(path)
+        return [_parse_match(entry) for entry in data.get("data", [])]
+
+    def get_match_details(self, matchid: str) -> MatchSummary:
+        """Detail complet d'un match a partir de son id."""
+        data = self._get(f"/v2/match/{matchid}")
+        d = data.get("data", {})
+        if not d:
+            raise RiotApiError(f"Match {matchid} : payload vide")
+        return _parse_match(d)
+
     def clear_cache(self) -> None:
         self._cache.clear()
+
+
+def _parse_match(entry: dict) -> MatchSummary:
+    meta    = entry.get("metadata", {}) or {}
+    teams   = entry.get("teams", {}) or {}
+    players = (entry.get("players", {}) or {}).get("all_players", []) or []
+
+    started_raw = meta.get("game_start") or 0
+    started_at  = datetime.fromtimestamp(int(started_raw), tz=timezone.utc)
+
+    parsed_players: list[MatchPlayerStats] = []
+    for p in players:
+        stats = p.get("stats", {}) or {}
+        parsed_players.append(MatchPlayerStats(
+            puuid=p.get("puuid", ""),
+            name=p.get("name", ""),
+            tag=p.get("tag", ""),
+            team=str(p.get("team", "")),
+            score=int(stats.get("score") or 0),
+            kills=int(stats.get("kills") or 0),
+            deaths=int(stats.get("deaths") or 0),
+            assists=int(stats.get("assists") or 0),
+        ))
+
+    return MatchSummary(
+        matchid=str(meta.get("matchid", "")),
+        mode=str(meta.get("mode", "")),
+        map_name=str(meta.get("map", "")),
+        started_at=started_at,
+        rounds_played=int(meta.get("rounds_played") or 0),
+        players=tuple(parsed_players),
+        rounds_red=int((teams.get("red")  or {}).get("rounds_won") or 0),
+        rounds_blue=int((teams.get("blue") or {}).get("rounds_won") or 0),
+    )

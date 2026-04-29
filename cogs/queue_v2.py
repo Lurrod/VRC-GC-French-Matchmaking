@@ -25,6 +25,81 @@ from services import repository
 JOIN_BTN_ID:  str = "queue_v2:join"
 LEAVE_BTN_ID: str = "queue_v2:leave"
 QUEUE_SIZE:   int = 10
+WAITING_ROOM_NAME: str = "Waiting Room"
+QUEUE_ROLE_NAME:   str = "En Queue"
+
+
+async def _grant_queue_role(member: discord.Member) -> str | None:
+    role = discord.utils.get(member.guild.roles, name=QUEUE_ROLE_NAME)
+    if role is None:
+        return f"⚠️ Role **{QUEUE_ROLE_NAME}** introuvable sur le serveur."
+    if role in member.roles:
+        return None
+    try:
+        await member.add_roles(role, reason="Joined queue")
+    except discord.Forbidden:
+        return f"⚠️ Permissions insuffisantes pour ajouter le role **{QUEUE_ROLE_NAME}**."
+    except discord.HTTPException:
+        return None
+    return None
+
+
+async def _revoke_queue_role(member: discord.Member) -> None:
+    role = discord.utils.get(member.guild.roles, name=QUEUE_ROLE_NAME)
+    if role is None or role not in member.roles:
+        return
+    try:
+        await member.remove_roles(role, reason="Left queue")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def _grant_match_role(member: discord.Member, role_name: str) -> None:
+    """Donne le role correspondant a la categorie de match (e.g. "Match #1")."""
+    role = discord.utils.get(member.guild.roles, name=role_name)
+    if role is None or role in member.roles:
+        return
+    try:
+        await member.add_roles(role, reason=f"Match formed in {role_name}")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def _revoke_match_role(member: discord.Member, role_name: str) -> None:
+    role = discord.utils.get(member.guild.roles, name=role_name)
+    if role is None or role not in member.roles:
+        return
+    try:
+        await member.remove_roles(role, reason="Match ended")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def _move_to_waiting_room(member: discord.Member) -> str | None:
+    """Deplace `member` dans le salon vocal "Waiting Room" si possible.
+
+    Retourne un message d'info pour le joueur, ou None si tout s'est bien passe
+    silencieusement. Discord n'autorise le deplacement que si le membre est deja
+    connecte a un salon vocal du serveur.
+    """
+    waiting = discord.utils.get(member.guild.voice_channels, name=WAITING_ROOM_NAME)
+    if waiting is None:
+        return None
+
+    voice_state = member.voice
+    if voice_state is None or voice_state.channel is None:
+        return f"ℹ️ Connecte-toi a un salon vocal pour etre deplace dans **{WAITING_ROOM_NAME}**."
+
+    if voice_state.channel.id == waiting.id:
+        return None
+
+    try:
+        await member.move_to(waiting, reason="Auto-move queue join")
+    except discord.Forbidden:
+        return f"⚠️ Permissions insuffisantes pour te deplacer dans **{WAITING_ROOM_NAME}**."
+    except discord.HTTPException:
+        return None
+    return None
 
 
 # ── Embed builder ─────────────────────────────────────────────────
@@ -109,12 +184,21 @@ class QueueView(discord.ui.View):
             embed = build_queue_embed(queue_doc, inter.guild)
             await inter.response.edit_message(embed=embed, view=self)
 
-            # 4b) confirmation ephemere (visible uniquement par le joueur)
+            # 4b) auto-move dans le salon vocal "Waiting Room"
+            move_notice = None
+            role_notice = None
+            if isinstance(inter.user, discord.Member):
+                move_notice = await _move_to_waiting_room(inter.user)
+                role_notice = await _grant_queue_role(inter.user)
+
+            # 4c) confirmation ephemere (visible uniquement par le joueur)
             count = len(queue_doc.get("players", []))
-            await inter.followup.send(
-                f"✅ Tu as rejoint la queue ({count}/{QUEUE_SIZE})",
-                ephemeral=True,
-            )
+            confirm = f"✅ Tu as rejoint la queue ({count}/{QUEUE_SIZE})"
+            if move_notice:
+                confirm += f"\n{move_notice}"
+            if role_notice:
+                confirm += f"\n{role_notice}"
+            await inter.followup.send(confirm, ephemeral=True)
 
             # 5) trigger formation (Phase 4 — on a un point d'extension)
             if full and self._on_full:
@@ -133,6 +217,8 @@ class QueueView(discord.ui.View):
                 return
             embed = build_queue_embed(res.queue, inter.guild)
             await inter.response.edit_message(embed=embed, view=self)
+            if isinstance(inter.user, discord.Member):
+                await _revoke_queue_role(inter.user)
 
 
 def _join_error_message(reason: str) -> str:

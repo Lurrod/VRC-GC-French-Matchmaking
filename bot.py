@@ -676,12 +676,6 @@ async def on_voice_state_update(member, before, after):
             print(f"[queue] Aucune categorie libre !")
             return
         print(f"[queue] Deplacement vers {match_category_name}")
-        member_origins = {}
-        for m in to_move:
-            for ch in guild.voice_channels:
-                if m in ch.members and ch.name in QUEUE_CHANNELS:
-                    member_origins[m.id] = ch.name
-                    break
         for m in to_move:
             try:
                 await m.move_to(match_channel)
@@ -692,33 +686,6 @@ async def on_voice_state_update(member, before, after):
         if guild.id in queue_join_times:
             for m in to_move:
                 queue_join_times[guild.id].pop(m.id, None)
-        prep_channel = None
-        found_category = discord.utils.get(guild.categories, name=match_category_name)
-        if found_category:
-            prep_channel = discord.utils.get(found_category.text_channels, name="match-preparation")
-        if not prep_channel:
-            prep_channel = discord.utils.get(guild.text_channels, name="match-preparation")
-        if prep_channel:
-            wr_players  = []
-            duo_players = []
-            unknown     = []
-            for m in to_move:
-                origin = member_origins.get(m.id)
-                if origin == "Waiting Room":
-                    wr_players.append(m)
-                elif origin in ["Duo Queue 1", "Duo Queue 2", "Duo Queue 3"]:
-                    duo_players.append((m, origin))
-                else:
-                    unknown.append(m)
-            embed = discord.Embed(title="Match trouve - 10 joueurs detectes !", color=0x5865f2, timestamp=datetime.now())
-            if wr_players:
-                embed.add_field(name="Waiting Room", value="\n".join([f"- {m.mention}" for m in wr_players]), inline=True)
-            if duo_players:
-                embed.add_field(name="Duo Queue", value="\n".join([f"- {m.mention} ({ch})" for m, ch in duo_players]), inline=True)
-            if unknown:
-                embed.add_field(name="Autres", value="\n".join([f"- {m.mention}" for m in unknown]), inline=False)
-            embed.set_footer(text=f"Deplaces vers {match_category_name} / Waiting Match")
-            await prep_channel.send(content="Un match vient de commencer !", embed=embed)
 
 # ── Commandes prefix ───────────────────────────────────────────
 @bot.command(name="leaderboard")
@@ -1098,7 +1065,7 @@ async def _load_v2_cogs() -> None:
     from cogs.match    import setup as setup_match
 
     await setup_riot_link(bot, db, riot_client)
-    match_cog = await setup_match(bot, db)
+    match_cog = await setup_match(bot, db, henrik_client=riot_client)
     await setup_queue_v2(bot, db, on_full=match_cog.on_queue_full)
 
 

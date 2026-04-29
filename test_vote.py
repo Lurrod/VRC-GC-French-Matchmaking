@@ -28,6 +28,12 @@ def _fake_guild(guild_id: int = 42, roles=None, channel=None):
     g.name = "TestGuild"
     g.roles = roles or []
     g.get_channel = lambda cid: channel
+    g.get_member = lambda uid: None  # par defaut : leader/players non resolus
+    if channel is not None:
+        channel.name = "elo-adding"
+        g.text_channels = [channel]
+    else:
+        g.text_channels = []
     return g
 
 
@@ -397,23 +403,34 @@ def _seed_match_with_avg_2400(db, guild_id: int = 42, message_id: int = 555):
     )
 
 
+async def _vote_and_verify(cog, guild, match_id, *, choice: str, db, guild_id: int = 42):
+    """Helper : 7 votes pour `choice` puis applique ELO via _verify_match
+    (henrik_client=None -> fallback ELO plat, comme apres 10 min sans Henrik)."""
+    view = cog.vote_view
+    for uid in range(7):
+        inter = _fake_interaction(_fake_member(uid), guild)
+        if choice == "a":
+            await view.vote_a.callback(inter)
+        else:
+            await view.vote_b.callback(inter)
+    match_doc = repository.get_match(db, guild_id, match_id)
+    # force_apply=True simule le passage du timeout Henrik (ELO plat)
+    await cog._verify_match(guild, match_doc, force_apply=True)
+
+
 async def test_validation_triggers_elo_update_in_db():
-    """Le 7e vote A -> 5 gagnants +15, 5 perdants -15 (sol a 0)."""
+    """Apres _verify_match (sans Henrik) : 5 gagnants +15, 5 perdants -15."""
     import bot as bot_module
     from cogs.match import MatchCog
 
-    _seed_match_with_avg_2400(bot_module.db)
+    match_id = _seed_match_with_avg_2400(bot_module.db)
 
     channel = MagicMock()
     channel.send = AsyncMock()
     guild = _fake_guild(channel=channel)
 
     cog = MatchCog(bot_module.bot, bot_module.db)
-    view = cog.vote_view
-
-    for uid in range(7):
-        inter = _fake_interaction(_fake_member(uid), guild)
-        await view.vote_a.callback(inter)
+    await _vote_and_verify(cog, guild, match_id, choice="a", db=bot_module.db)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
@@ -430,20 +447,15 @@ async def test_validation_sends_recap_embed():
     import bot as bot_module
     from cogs.match import MatchCog
 
-    _seed_match_with_avg_2400(bot_module.db)
+    match_id = _seed_match_with_avg_2400(bot_module.db)
 
     channel = MagicMock()
     channel.send = AsyncMock()
     guild = _fake_guild(channel=channel)
 
     cog = MatchCog(bot_module.bot, bot_module.db)
-    view = cog.vote_view
+    await _vote_and_verify(cog, guild, match_id, choice="a", db=bot_module.db)
 
-    for uid in range(7):
-        inter = _fake_interaction(_fake_member(uid), guild)
-        await view.vote_a.callback(inter)
-
-    # Le recap est envoye au moins une fois sur le channel du match
     channel.send.assert_awaited()
     sent_embeds = [
         c.kwargs.get("embed") for c in channel.send.call_args_list if c.kwargs.get("embed")
@@ -453,7 +465,6 @@ async def test_validation_sends_recap_embed():
     fields = {f.name: f.value for f in recap.fields}
     assert any("Gagnants" in n for n in fields)
     assert any("Perdants" in n for n in fields)
-    # Verifie qu'on voit le delta +15
     assert "+15" in fields["🟢 Gagnants"]
 
 
@@ -462,7 +473,7 @@ async def test_validation_with_high_elo_match_bigger_gain():
     import bot as bot_module
     from cogs.match import MatchCog
 
-    repository.create_match(
+    match_id = repository.create_match(
         bot_module.db, guild_id=42,
         team_a=[{"id": i, "name": f"P{i}", "elo": 3000} for i in range(0, 5)],
         team_b=[{"id": i, "name": f"P{i}", "elo": 3000} for i in range(5, 10)],
@@ -477,17 +488,38 @@ async def test_validation_with_high_elo_match_bigger_gain():
     channel.send = AsyncMock()
     guild = _fake_guild(channel=channel)
     cog = MatchCog(bot_module.bot, bot_module.db)
-
-    for uid in range(7):
-        inter = _fake_interaction(_fake_member(uid), guild)
-        await cog.vote_view.vote_a.callback(inter)
+    await _vote_and_verify(cog, guild, match_id, choice="a", db=bot_module.db)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     assert elo_col.find_one({"_id": "0"})["elo"] == 19    # winner +19 (Radiant avg)
 
 
 async def test_validated_b_distributes_correctly():
-    """7 votes B -> team_b gagne, team_a perd."""
+    """7 votes B -> team_b gagne, team_a perd (apres _verify_match)."""
+    import bot as bot_module
+    from cogs.match import MatchCog
+
+    match_id = _seed_match_with_avg_2400(bot_module.db)
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    guild = _fake_guild(channel=channel)
+    cog = MatchCog(bot_module.bot, bot_module.db)
+    await _vote_and_verify(cog, guild, match_id, choice="b", db=bot_module.db)
+
+    elo_col = repository.get_elo_col(bot_module.db, 42)
+    # team_b (5..9) gagnent +15
+    for i in range(5, 10):
+        assert elo_col.find_one({"_id": str(i)})["elo"] == 15
+        assert elo_col.find_one({"_id": str(i)})["wins"] == 1
+    # team_a (0..4) perdent (mais demarrent a 0 -> reste 0)
+    for i in range(5):
+        assert elo_col.find_one({"_id": str(i)})["elo"] == 0
+        assert elo_col.find_one({"_id": str(i)})["losses"] == 1
+
+
+async def test_vote_validation_does_not_touch_elo():
+    """Garde-fou : le vote seul ne touche plus a l'ELO ; il faut _verify_match."""
     import bot as bot_module
     from cogs.match import MatchCog
 
@@ -500,14 +532,9 @@ async def test_validated_b_distributes_correctly():
 
     for uid in range(7):
         inter = _fake_interaction(_fake_member(uid), guild)
-        await cog.vote_view.vote_b.callback(inter)
+        await cog.vote_view.vote_a.callback(inter)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    # team_b (5..9) gagnent +15
-    for i in range(5, 10):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 15
-        assert elo_col.find_one({"_id": str(i)})["wins"] == 1
-    # team_a (0..4) perdent (mais demarrent a 0 -> reste 0)
-    for i in range(5):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 0
-        assert elo_col.find_one({"_id": str(i)})["losses"] == 1
+    # Aucun doc ELO cree : l'ELO sera applique uniquement par _verify_match.
+    for i in range(10):
+        assert elo_col.find_one({"_id": str(i)}) is None

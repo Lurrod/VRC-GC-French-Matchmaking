@@ -28,8 +28,24 @@ from typing import Final
 import discord
 from discord.ext import commands, tasks
 
+import asyncio
+
+from cogs.queue_v2 import _grant_match_role, _revoke_match_role, _revoke_queue_role
+
+MATCH_ROLE_CLEANUP_DELAY_SECONDS: Final[int] = 60
+MATCH_HOST_ROLE_NAME: Final[str]              = "Match Host"
+MATCH_HOST_CLEANUP_DELAY_SECONDS: Final[int]  = 600  # 10 min apres validation
+
 from services import repository
-from services.elo_updater import apply_match_validation, MatchEloOutcome
+from services.elo_updater import (
+    apply_match_validation,
+    MatchEloOutcome,
+)
+from services.match_verifier import (
+    find_henrik_custom_match,
+    compute_acs_multipliers,
+)
+from services.riot_api import HenrikDevClient
 from services.match_service import (
     build_players,
     plan_match,
@@ -42,7 +58,9 @@ from services.match_service import (
 VOTE_A_BTN_ID:    Final[str] = "vote_v2:a"
 VOTE_B_BTN_ID:    Final[str] = "vote_v2:b"
 MAJORITY_THRESHOLD: Final[int] = 7
-VOTE_TIMEOUT_MINUTES: Final[int] = 60
+VOTE_TIMEOUT_MINUTES: Final[int]            = 60
+HENRIK_VERIFY_DELAY_MINUTES: Final[int]     = 5    # premier essai Henrik a 5 min
+HENRIK_VERIFY_TIMEOUT_MINUTES: Final[int]   = 30   # abandon Henrik et ELO plat a 30 min
 
 # Roles cibles pour le ping admin (premier trouve gagne)
 ADMIN_ROLE_NAMES: Final[tuple[str, ...]] = ("Admin", "Match Staff", "Administrateur")
@@ -158,12 +176,24 @@ def build_elo_changes_embed(outcome: MatchEloOutcome, match_doc: dict, guild_nam
     else:
         winner_label, color = "Team B", 0xe74c3c
 
+    weighted = outcome.weighted
+    title = (
+        f"🏆 {winner_label} l'emporte ! ELO mis a jour"
+        f"{' (ponderation ACS)' if weighted else ''}"
+    )
+    desc_extra = (
+        "\nPonderation ACS appliquee via stats HenrikDev."
+        if weighted
+        else "\n⚠️ Match Riot non retrouve sur HenrikDev — ELO plat applique."
+    )
+
     embed = discord.Embed(
-        title=f"🏆 {winner_label} l'emporte ! ELO mis a jour",
+        title=title,
         description=(
             f"Avg ELO du match : **{outcome.avg_elo}**\n"
-            f"Gain par gagnant : **+{outcome.gain}**\n"
-            f"Perte par perdant : **-{outcome.loss}**"
+            f"Base gagnant : **+{outcome.gain}**\n"
+            f"Base perdant : **-{outcome.loss}**"
+            f"{desc_extra}"
         ),
         color=color,
         timestamp=datetime.now(timezone.utc),
@@ -172,14 +202,16 @@ def build_elo_changes_embed(outcome: MatchEloOutcome, match_doc: dict, guild_nam
     winners = [c for c in outcome.changes if c.win]
     losers  = [c for c in outcome.changes if not c.win]
 
-    w_lines = "\n".join(
-        f"• <@{c.user_id}>  +{c.delta}  →  **{c.new_elo}** *(etait {c.old_elo})*"
-        for c in winners
-    )
-    l_lines = "\n".join(
-        f"• <@{c.user_id}>  {c.delta}  →  **{c.new_elo}** *(etait {c.old_elo})*"
-        for c in losers
-    )
+    def _fmt(c):
+        sign = "+" if c.delta >= 0 else ""
+        mult = f" ×{c.multiplier:.2f}" if weighted else ""
+        return (
+            f"• <@{c.user_id}>{mult}  {sign}{c.delta}  →  **{c.new_elo}** "
+            f"*(etait {c.old_elo})*"
+        )
+
+    w_lines = "\n".join(_fmt(c) for c in winners)
+    l_lines = "\n".join(_fmt(c) for c in losers)
     embed.add_field(name="🟢 Gagnants", value=w_lines or "—", inline=False)
     embed.add_field(name="🔴 Perdants", value=l_lines or "—", inline=False)
     embed.set_footer(text=guild_name)
@@ -275,11 +307,19 @@ class VoteView(discord.ui.View):
 
 # ── Cog ───────────────────────────────────────────────────────────
 class MatchCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, db, *, rng: random.Random | None = None) -> None:
-        self.bot       = bot
-        self.db        = db
-        self.rng       = rng or random.Random()
-        self.vote_view = VoteView(db, on_validated=self._on_match_validated)
+    def __init__(
+        self,
+        bot: commands.Bot,
+        db,
+        *,
+        rng: random.Random | None = None,
+        henrik_client: HenrikDevClient | None = None,
+    ) -> None:
+        self.bot           = bot
+        self.db            = db
+        self.rng           = rng or random.Random()
+        self.henrik_client = henrik_client
+        self.vote_view     = VoteView(db, on_validated=self._on_match_validated)
 
     # ── Branchement queue full ───────────────────────────────────
     async def on_queue_full(self, interaction: discord.Interaction, queue_doc: dict):
@@ -345,6 +385,19 @@ class MatchCog(commands.Cog):
             channel_id=prep_channel.id,
         )
 
+        # Retire "En Queue" et donne le role de la categorie (Match #1/2/3)
+        for uid in player_ids:
+            member = guild.get_member(int(uid))
+            if member is not None:
+                await _revoke_queue_role(member)
+                await _grant_match_role(member, free_cat_name)
+
+        # Donne le role "Match Host" au lobby leader pour qu'il puisse
+        # poster le screen de fin de game dans le salon dedie.
+        leader_member = guild.get_member(int(plan.lobby_leader.id))
+        if leader_member is not None:
+            await _grant_match_role(leader_member, MATCH_HOST_ROLE_NAME)
+
         # Reset queue + repose le message setup-queue dans le salon d'origine
         # pour qu'une nouvelle queue soit immediatement disponible.
         repository.delete_active_queue(self.db, guild.id)
@@ -367,29 +420,58 @@ class MatchCog(commands.Cog):
         except Exception:
             pass
 
-    # ── Hook : MAJ ELO apres validation du vote ──────────────────
+    # ── Hook : vote valide ───────────────────────────────────────
     async def _on_match_validated(self, inter, match_doc) -> None:
         """
-        Distribue les ELO sur la table V1 selon la moyenne d'effective_elo
-        des 10 joueurs du match. Envoie un recap dans le salon.
+        Vote valide : on NE TOUCHE PAS encore a l'ELO.
+        L'ELO sera applique en une seule passe par `_verify_match`
+        apres ~HENRIK_VERIFY_DELAY_MINUTES (avec ponderation ACS si
+        HenrikDev a retrouve le custom, plat sinon).
         """
-        try:
-            outcome = apply_match_validation(self.db, inter.guild.id, match_doc)
-        except Exception as e:
-            print(f"[match] apply_match_validation a leve : {e}")
-            return
+        elo_log_channel = discord.utils.get(
+            inter.guild.text_channels, name="elo-adding",
+        )
+        if elo_log_channel is not None:
+            try:
+                await elo_log_channel.send(
+                    f"⏳ Match valide ({match_doc.get('status')}). "
+                    f"Verification HenrikDev a partir de {HENRIK_VERIFY_DELAY_MINUTES} min "
+                    f"(retry chaque minute, abandon a {HENRIK_VERIFY_TIMEOUT_MINUTES} min)."
+                )
+            except Exception as e:
+                print(f"[match] envoi annonce attente Henrik a leve : {e}")
 
-        embed = build_elo_changes_embed(outcome, match_doc, inter.guild.name)
-        channel_id = match_doc.get("channel_id")
-        if not channel_id:
-            return
-        channel = inter.guild.get_channel(int(channel_id))
-        if channel is None:
-            return
-        try:
-            await channel.send(embed=embed)
-        except Exception as e:
-            print(f"[match] envoi du recap a leve : {e}")
+        # Suppression differee du role "Match #N" attribue aux 10 joueurs
+        category_name = match_doc.get("category_name")
+        if category_name:
+            asyncio.create_task(
+                self._cleanup_match_role(inter.guild, match_doc, category_name)
+            )
+
+        # Suppression differee du role "Match Host" attribue au lobby leader
+        # (laisse 10 min pour qu'il poste le screen de fin de game).
+        leader_id = match_doc.get("lobby_leader_id")
+        if leader_id is not None:
+            asyncio.create_task(
+                self._cleanup_match_host_role(inter.guild, leader_id)
+            )
+
+    async def _cleanup_match_role(self, guild, match_doc: dict, role_name: str) -> None:
+        await asyncio.sleep(MATCH_ROLE_CLEANUP_DELAY_SECONDS)
+        for team_key in ("team_a", "team_b"):
+            for player in match_doc.get(team_key, []):
+                uid = player.get("id")
+                if uid is None:
+                    continue
+                member = guild.get_member(int(uid))
+                if member is not None:
+                    await _revoke_match_role(member, role_name)
+
+    async def _cleanup_match_host_role(self, guild, leader_id) -> None:
+        await asyncio.sleep(MATCH_HOST_CLEANUP_DELAY_SECONDS)
+        member = guild.get_member(int(leader_id))
+        if member is not None:
+            await _revoke_match_role(member, MATCH_HOST_ROLE_NAME)
 
     # ── Timeout des votes ────────────────────────────────────────
     async def check_vote_timeouts(self, *, now: datetime | None = None) -> int:
@@ -420,6 +502,14 @@ class MatchCog(commands.Cog):
             self.db, guild.id, match["_id"], "contested",
         )
 
+        # Retire immediatement le role "Match Host" au lobby leader :
+        # le vote n'a pas abouti dans VOTE_TIMEOUT_MINUTES, l'admin reprend la main.
+        leader_id = match.get("lobby_leader_id")
+        if leader_id is not None:
+            leader_member = guild.get_member(int(leader_id))
+            if leader_member is not None:
+                await _revoke_match_role(leader_member, MATCH_HOST_ROLE_NAME)
+
         admin_role = None
         for role_name in ADMIN_ROLE_NAMES:
             admin_role = discord.utils.get(guild.roles, name=role_name)
@@ -447,13 +537,130 @@ class MatchCog(commands.Cog):
         except Exception as e:
             print(f"[match] _handle_timeout send a leve : {e}")
 
+    # ── Verification HenrikDev + application ELO unique ──────────
+    async def check_henrik_verifications(self, *, now: datetime | None = None) -> int:
+        """Pour chaque match valide depuis > HENRIK_VERIFY_DELAY_MINUTES sans
+        verification Henrik :
+          - cherche le custom HenrikDev (multiplicateurs ACS si trouve)
+          - si Henrik trouve : applique ELO pondere (definitif)
+          - si Henrik ne trouve pas et qu'on est sous le timeout : on retentera
+            au prochain tick (boucle 1 min)
+          - si on a depasse HENRIK_VERIFY_TIMEOUT_MINUTES : applique ELO plat
+            et marque le match comme verifie (abandon Henrik)
+        Retourne le nombre de matches traites."""
+        now    = now or datetime.now(timezone.utc)
+        start_cutoff   = now - timedelta(minutes=HENRIK_VERIFY_DELAY_MINUTES)
+        timeout_cutoff = now - timedelta(minutes=HENRIK_VERIFY_TIMEOUT_MINUTES)
+        processed = 0
+        for guild in self.bot.guilds:
+            stale = repository.find_validated_unverified(self.db, guild.id, start_cutoff)
+            for match in stale:
+                validated_at = match.get("validated_at") or match.get("created_at")
+                timed_out = bool(
+                    validated_at is not None and validated_at <= timeout_cutoff
+                )
+                try:
+                    await self._verify_match(guild, match, force_apply=timed_out)
+                except Exception as e:
+                    print(f"[match] verify_match a leve : {e}")
+                processed += 1
+        return processed
+
+    async def _verify_match(
+        self, guild, match_doc: dict, *, force_apply: bool = False,
+    ) -> None:
+        """
+        Tente la verif HenrikDev. Applique l'ELO si :
+          - Henrik a trouve les multiplicateurs ACS (ELO pondere), OU
+          - `force_apply` est True (timeout atteint -> ELO plat).
+        Sinon : ne fait rien, le match sera retente au prochain tick.
+        Marque le match `henrik_verified` apres application pour bloquer les retries.
+        """
+        multipliers: dict[str, float] | None = None
+        if self.henrik_client is not None:
+            multipliers = await self._fetch_henrik_multipliers(guild, match_doc)
+
+        if multipliers is None and not force_apply:
+            # Pas trouve, pas en timeout -> on retentera dans 1 min.
+            return
+
+        try:
+            outcome = apply_match_validation(
+                self.db, guild.id, match_doc, multipliers=multipliers,
+            )
+        except Exception as e:
+            print(f"[match] apply_match_validation a leve : {e}")
+            return
+
+        repository.set_match_henrik_verified(
+            self.db, guild.id, match_doc["_id"],
+            found=multipliers is not None,
+            multipliers=multipliers,
+        )
+
+        embed   = build_elo_changes_embed(outcome, match_doc, guild.name)
+        elo_log = discord.utils.get(guild.text_channels, name="elo-adding")
+        if elo_log is not None:
+            try:
+                await elo_log.send(embed=embed)
+            except Exception as e:
+                print(f"[match] envoi recap ELO a leve : {e}")
+
+    async def _fetch_henrik_multipliers(
+        self, guild, match_doc: dict,
+    ) -> dict[str, float] | None:
+        """Tente de retrouver le custom HenrikDev et de calculer les
+        multiplicateurs ACS. Retourne None si pas exploitable."""
+        leader_uid  = str(match_doc.get("lobby_leader_id"))
+        leader_riot = repository.get_riot_account(self.db, guild.id, leader_uid)
+        if not leader_riot:
+            return None
+
+        team_a_uid_by_puuid: dict[str, str] = {}
+        team_b_uid_by_puuid: dict[str, str] = {}
+        for p in match_doc.get("team_a", []):
+            riot = repository.get_riot_account(self.db, guild.id, str(p["id"]))
+            if riot and riot.get("puuid"):
+                team_a_uid_by_puuid[riot["puuid"]] = str(p["id"])
+        for p in match_doc.get("team_b", []):
+            riot = repository.get_riot_account(self.db, guild.id, str(p["id"]))
+            if riot and riot.get("puuid"):
+                team_b_uid_by_puuid[riot["puuid"]] = str(p["id"])
+
+        expected = set(team_a_uid_by_puuid) | set(team_b_uid_by_puuid)
+        if len(expected) < 10:
+            return None
+
+        after = match_doc.get("created_at") or match_doc.get("validated_at")
+        summary = find_henrik_custom_match(
+            self.henrik_client,
+            region=str(leader_riot.get("region", "eu")),
+            leader_name=str(leader_riot.get("name", "")),
+            leader_tag=str(leader_riot.get("tag", "")),
+            expected_puuids=expected,
+            after=after,
+        )
+        if summary is None:
+            return None
+
+        verified = compute_acs_multipliers(
+            summary,
+            team_a_uid_by_puuid=team_a_uid_by_puuid,
+            team_b_uid_by_puuid=team_b_uid_by_puuid,
+        )
+        return {p.user_id: p.multiplier for p in verified.performances}
+
     # ── Loop periodique (1 min) ──────────────────────────────────
     @tasks.loop(minutes=1)
     async def _timeout_loop(self):
         try:
             await self.check_vote_timeouts()
         except Exception as e:
-            print(f"[match] _timeout_loop a leve : {e}")
+            print(f"[match] check_vote_timeouts a leve : {e}")
+        try:
+            await self.check_henrik_verifications()
+        except Exception as e:
+            print(f"[match] check_henrik_verifications a leve : {e}")
 
     @_timeout_loop.before_loop
     async def _before_loop(self):
@@ -466,8 +673,14 @@ class MatchCog(commands.Cog):
         self._timeout_loop.cancel()
 
 
-async def setup(bot: commands.Bot, db, *, rng: random.Random | None = None) -> MatchCog:
-    cog = MatchCog(bot, db, rng=rng)
+async def setup(
+    bot: commands.Bot,
+    db,
+    *,
+    rng: random.Random | None = None,
+    henrik_client: HenrikDevClient | None = None,
+) -> MatchCog:
+    cog = MatchCog(bot, db, rng=rng, henrik_client=henrik_client)
     await bot.add_cog(cog)
     bot.add_view(cog.vote_view)
     return cog
