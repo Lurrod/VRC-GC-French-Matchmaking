@@ -493,6 +493,24 @@ class MatchCog(commands.Cog):
                 "created_at": {"$lt": cutoff},
             }))
             for match in stale:
+                # Auto-reparation : un match peut avoir atteint 7+ votes pour
+                # une equipe sans transition (ex: crash bot entre l'ecriture
+                # du vote et set_match_status). On recupere au lieu de
+                # marquer contested ; check_henrik_verifications appliquera
+                # l'ELO au prochain tick.
+                votes   = match.get("votes", {})
+                count_a = sum(1 for v in votes.values() if v == "a")
+                count_b = sum(1 for v in votes.values() if v == "b")
+                if count_a >= MAJORITY_THRESHOLD:
+                    repository.set_match_status(
+                        self.db, guild.id, match["_id"], "validated_a",
+                    )
+                    continue
+                if count_b >= MAJORITY_THRESHOLD:
+                    repository.set_match_status(
+                        self.db, guild.id, match["_id"], "validated_b",
+                    )
+                    continue
                 await self._handle_timeout(guild, match)
                 flagged += 1
         return flagged

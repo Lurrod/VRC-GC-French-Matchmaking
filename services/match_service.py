@@ -125,9 +125,11 @@ def find_free_match_prep(guild) -> tuple[str, object] | None:
             continue
         team1 = discord.utils.get(category.voice_channels, name="Team 1")
         team2 = discord.utils.get(category.voice_channels, name="Team 2")
+        waiting = discord.utils.get(category.voice_channels, name="Waiting Match")
         team1_empty = (team1 is None) or (len(team1.members) == 0)
         team2_empty = (team2 is None) or (len(team2.members) == 0)
-        if not (team1_empty and team2_empty):
+        waiting_empty = (waiting is None) or (len(waiting.members) == 0)
+        if not (team1_empty and team2_empty and waiting_empty):
             continue
         prep = discord.utils.get(category.text_channels, name="match-preparation")
         if prep is None:

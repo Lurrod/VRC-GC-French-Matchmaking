@@ -132,7 +132,7 @@ def test_serialize_team_returns_list_of_dicts():
 
 
 # ── find_free_match_category ──────────────────────────────────────
-def _fake_category(name: str, t1_members: int, t2_members: int):
+def _fake_category(name: str, t1_members: int, t2_members: int, waiting_members: int = 0):
     cat = MagicMock()
     cat.name = name
     t1 = MagicMock(name=f"{name}-t1")
@@ -141,7 +141,10 @@ def _fake_category(name: str, t1_members: int, t2_members: int):
     t2 = MagicMock(name=f"{name}-t2")
     t2.name = "Team 2"
     t2.members = list(range(t2_members))
-    cat.voice_channels = [t1, t2]
+    waiting = MagicMock(name=f"{name}-waiting")
+    waiting.name = "Waiting Match"
+    waiting.members = list(range(waiting_members))
+    cat.voice_channels = [t1, t2, waiting]
     return cat
 
 
@@ -175,5 +178,18 @@ def test_find_free_category_none_when_all_occupied():
 
 def test_find_free_category_none_when_no_match_categories():
     cat = _fake_category("General", t1_members=0, t2_members=0)
+    guild = _fake_guild_with_categories(cat)
+    assert find_free_match_category(guild) is None
+
+
+def test_find_free_category_skips_when_waiting_match_occupied():
+    cat1 = _fake_category("Match #1", t1_members=0, t2_members=0, waiting_members=3)
+    cat2 = _fake_category("Match #2", t1_members=0, t2_members=0, waiting_members=0)
+    guild = _fake_guild_with_categories(cat1, cat2)
+    assert find_free_match_category(guild) == "Match #2"
+
+
+def test_find_free_category_none_when_only_waiting_match_occupied():
+    cat = _fake_category("Match #1", t1_members=0, t2_members=0, waiting_members=1)
     guild = _fake_guild_with_categories(cat)
     assert find_free_match_category(guild) is None

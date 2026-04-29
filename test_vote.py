@@ -292,6 +292,100 @@ async def test_timeout_marks_pending_match_contested():
     match = repository.get_match(bot_module.db, 42, match_id)
     assert match["status"] == "contested"
 
+
+async def test_timeout_self_heals_pending_with_majority_a():
+    """Si un match `pending` expire mais a deja 7+ votes A (transition
+    perdue suite a crash / erreur), check_vote_timeouts doit le passer
+    en `validated_a` au lieu de `contested`."""
+    import bot as bot_module
+
+    match_id = _seed_match(bot_module.db)
+    bot_module.db["matches_42"].update_one(
+        {"_id": match_id},
+        {"$set": {
+            "created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
+            "votes": {str(i): "a" for i in range(MAJORITY_THRESHOLD)},
+        }},
+    )
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    guild = _fake_guild(channel=channel)
+
+    cog = MatchCog(bot_module.bot, bot_module.db)
+    cog.bot = MagicMock()
+    cog.bot.guilds = [guild]
+
+    flagged = await cog.check_vote_timeouts()
+    assert flagged == 0
+
+    match = repository.get_match(bot_module.db, 42, match_id)
+    assert match["status"] == "validated_a"
+    assert match["validated_at"] is not None
+    channel.send.assert_not_awaited()
+
+
+async def test_timeout_self_heals_pending_with_majority_b():
+    """Symetrique : 7+ votes B -> validated_b."""
+    import bot as bot_module
+
+    match_id = _seed_match(bot_module.db)
+    bot_module.db["matches_42"].update_one(
+        {"_id": match_id},
+        {"$set": {
+            "created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
+            "votes": {str(i): "b" for i in range(MAJORITY_THRESHOLD)},
+        }},
+    )
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    guild = _fake_guild(channel=channel)
+
+    cog = MatchCog(bot_module.bot, bot_module.db)
+    cog.bot = MagicMock()
+    cog.bot.guilds = [guild]
+
+    flagged = await cog.check_vote_timeouts()
+    assert flagged == 0
+
+    match = repository.get_match(bot_module.db, 42, match_id)
+    assert match["status"] == "validated_b"
+    channel.send.assert_not_awaited()
+
+
+async def test_timeout_still_marks_contested_when_no_majority():
+    """Garde-fou : si total >= 7 mais reparti (ex 4-3), on contested."""
+    import bot as bot_module
+
+    match_id = _seed_match(bot_module.db)
+    split_votes = {**{str(i): "a" for i in range(4)},
+                   **{str(i): "b" for i in range(4, 7)}}
+    bot_module.db["matches_42"].update_one(
+        {"_id": match_id},
+        {"$set": {
+            "created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
+            "votes": split_votes,
+        }},
+    )
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    admin_role = MagicMock()
+    admin_role.name = "Admin"
+    admin_role.mention = "@AdminRole"
+    guild = _fake_guild(roles=[admin_role], channel=channel)
+
+    cog = MatchCog(bot_module.bot, bot_module.db)
+    cog.bot = MagicMock()
+    cog.bot.guilds = [guild]
+
+    flagged = await cog.check_vote_timeouts()
+    assert flagged == 1
+
+    match = repository.get_match(bot_module.db, 42, match_id)
+    assert match["status"] == "contested"
+
     channel.send.assert_awaited_once()
     args, _ = channel.send.call_args
     assert "@AdminRole" in args[0]

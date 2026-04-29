@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import random
 from pymongo import MongoClient
 from leaderboard_img import generate_leaderboard
@@ -32,7 +32,7 @@ MATCH_CHANNEL    = "Waiting Match"
 QUEUE_SIZE       = 10
 
 # ── MongoDB ────────────────────────────────────────────────────
-client = MongoClient(MONGO_URL)
+client = MongoClient(MONGO_URL, tz_aware=True, tzinfo=timezone.utc)
 db     = client["elobot"]
 
 def get_elo_col(guild_id):
