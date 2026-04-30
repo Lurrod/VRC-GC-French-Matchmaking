@@ -27,10 +27,6 @@ WIN_ELO   = list(elo_calc.WIN_ELO)
 LOSE_ELO  = list(elo_calc.LOSE_ELO)
 MAPS      = list(elo_calc.MAPS)
 
-QUEUE_CHANNELS   = ["Waiting Room", "Duo Queue 1", "Duo Queue 2", "Duo Queue 3"]
-MATCH_CHANNEL    = "Waiting Match"
-QUEUE_SIZE       = 10
-
 # ── MongoDB ────────────────────────────────────────────────────
 client = MongoClient(MONGO_URL, tz_aware=True, tzinfo=timezone.utc)
 db     = client["elobot"]
@@ -598,94 +594,6 @@ async def help_cmd(interaction: discord.Interaction, type: str = "membres"):
 async def bypass_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("Seuls les administrateurs peuvent configurer le bypass.", ephemeral=True)
-
-# ── Système de Queue ───────────────────────────────────────────
-queue_locks = {}
-queue_join_times = {}  # {guild_id: {member_id: timestamp}}
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    guild = member.guild
-
-    # Enregistre l'heure d'arrivée en queue
-    if after.channel is not None and after.channel.name in QUEUE_CHANNELS:
-        if guild.id not in queue_join_times:
-            queue_join_times[guild.id] = {}
-        if member.id not in queue_join_times[guild.id]:
-            queue_join_times[guild.id][member.id] = datetime.now()
-            print(f"[queue] {member.display_name} en queue depuis {queue_join_times[guild.id][member.id].strftime('%H:%M:%S')}")
-
-    # Supprime l'heure si le joueur quitte la queue
-    if before.channel is not None and before.channel.name in QUEUE_CHANNELS:
-        if after.channel is None or after.channel.name not in QUEUE_CHANNELS:
-            if guild.id in queue_join_times and member.id in queue_join_times[guild.id]:
-                del queue_join_times[guild.id][member.id]
-
-    if after.channel is None:
-        return
-    if after.channel.name not in QUEUE_CHANNELS:
-        return
-    print(f"[queue] {member.display_name} a rejoint {after.channel.name}")
-    if guild.id not in queue_locks:
-        queue_locks[guild.id] = asyncio.Lock()
-    async with queue_locks[guild.id]:
-        queue_members = []
-        for ch in guild.voice_channels:
-            if ch.name in QUEUE_CHANNELS:
-                queue_members.extend(ch.members)
-        seen = set()
-        unique_members = []
-        for m in queue_members:
-            if m.id not in seen:
-                seen.add(m.id)
-                unique_members.append(m)
-        print(f"[queue] Total en queue : {len(unique_members)}/{QUEUE_SIZE}")
-        if len(unique_members) < QUEUE_SIZE:
-            return
-
-        # Trie tous les membres par ordre d'arrivée (premier arrivé = prioritaire)
-        join_times = queue_join_times.get(guild.id, {})
-        def get_join_time(m):
-            return join_times.get(m.id, datetime.now())
-
-        to_move = sorted(unique_members, key=get_join_time)[:QUEUE_SIZE]
-        print(f"[queue] Selection : {len(to_move)} joueurs")
-        if len(to_move) < QUEUE_SIZE:
-            print(f"[queue] Pas assez de joueurs ({len(to_move)}/{QUEUE_SIZE})")
-            return
-        match_channel = None
-        match_category_name = None
-        for i in range(1, 4):
-            cat_name = f"Match #{i}"
-            category = discord.utils.get(guild.categories, name=cat_name)
-            if not category:
-                continue
-            team1 = discord.utils.get(category.voice_channels, name="Team 1")
-            team2 = discord.utils.get(category.voice_channels, name="Team 2")
-            waiting = discord.utils.get(category.voice_channels, name="Waiting Match")
-            team1_empty   = len(team1.members)   == 0 if team1   else True
-            team2_empty   = len(team2.members)   == 0 if team2   else True
-            waiting_empty = len(waiting.members) == 0 if waiting else True
-            if team1_empty and team2_empty and waiting_empty:
-                if waiting:
-                    match_channel = waiting
-                    match_category_name = cat_name
-                    print(f"[queue] Categorie libre : {cat_name}")
-                    break
-        if not match_channel:
-            print(f"[queue] Aucune categorie libre !")
-            return
-        print(f"[queue] Deplacement vers {match_category_name}")
-        for m in to_move:
-            try:
-                await m.move_to(match_channel)
-            except Exception:
-                pass
-
-        # Nettoie les temps d'attente des joueurs déplacés
-        if guild.id in queue_join_times:
-            for m in to_move:
-                queue_join_times[guild.id].pop(m.id, None)
 
 # ── Commandes prefix ───────────────────────────────────────────
 @bot.command(name="leaderboard")

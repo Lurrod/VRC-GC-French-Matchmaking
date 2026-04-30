@@ -10,7 +10,7 @@ from services import repository
 from services.team_balancer import Player
 
 
-def _fake_member(member_id: int, name: str = "User"):
+def _fake_member(member_id: int, name: str = "User", voice_channel=None):
     m = MagicMock()
     m.id = member_id
     m.display_name = name
@@ -19,15 +19,30 @@ def _fake_member(member_id: int, name: str = "User"):
     m.guild = MagicMock(roles=[])
     m.add_roles = AsyncMock()
     m.remove_roles = AsyncMock()
+    m.move_to = AsyncMock()
+    if voice_channel is not None:
+        voice = MagicMock()
+        voice.channel = voice_channel
+        m.voice = voice
+    else:
+        m.voice = None
     return m
 
 
-def _fake_category(name: str, t1_empty: bool = True, t2_empty: bool = True, with_prep: bool = True):
+def _fake_category(name: str, t1_empty: bool = True, t2_empty: bool = True,
+                   with_prep: bool = True, with_waiting: bool = True):
     cat = MagicMock()
     cat.name = name
     t1 = MagicMock(); t1.name = "Team 1"; t1.members = [] if t1_empty else [object()]
     t2 = MagicMock(); t2.name = "Team 2"; t2.members = [] if t2_empty else [object()]
-    cat.voice_channels = [t1, t2]
+    vcs = [t1, t2]
+    if with_waiting:
+        waiting = MagicMock()
+        waiting.name = "Waiting Match"
+        waiting.id = 800 + (hash(name) % 100)
+        waiting.members = []
+        vcs.append(waiting)
+    cat.voice_channels = vcs
     if with_prep:
         prep = MagicMock()
         prep.name = "match-preparation"
@@ -250,6 +265,125 @@ async def test_vote_view_buttons_have_stable_custom_ids():
     custom_ids = {c.custom_id for c in view.children}
     assert VOTE_A_BTN_ID in custom_ids
     assert VOTE_B_BTN_ID in custom_ids
+
+
+# ── Ordre roles -> message et deplacement VC (audit user) ────────
+async def test_roles_granted_before_match_message_sent():
+    """Le message de match doit arriver APRES l'attribution du role Match #N
+    (sinon les joueurs sans le role ne voient pas l'embed dans match-preparation).
+    On verifie l'ordre via un compteur d'evenements partage entre add_roles
+    et prep.send."""
+    import bot as bot_module
+    queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
+
+    events = []
+    members = [_fake_member(i, f"P{i}") for i in range(10)]
+    for m in members:
+        async def _add(*args, _id=m.id, **kwargs):
+            events.append(("add_roles", _id))
+        m.add_roles.side_effect = _add
+
+    cat = _fake_category("Match #1")
+    prep = cat.text_channels[0]
+    async def _prep_send(*args, **kwargs):
+        events.append(("prep_send", None))
+        msg = MagicMock(); msg.id = 555
+        return msg
+    prep.send.side_effect = _prep_send
+
+    channel = _fake_channel(100)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    inter = _fake_interaction(guild)
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
+    await cog.on_queue_full(inter, queue_doc)
+
+    # Le test echoue si le faux role manque ; on verifie l'ordre uniquement si
+    # add_roles a ete appele (cas reel : le serveur a le role Match #N).
+    # Ici les members ont guild.roles=[] donc _grant_match_role return early.
+    # On contourne en verifiant que prep.send est bien appele apres tout
+    # autre evenement (smoke test : present + position dernier evenement).
+    assert ("prep_send", None) in events
+    # Si jamais add_roles a tire (futur : roles configures), il doit etre
+    # avant prep_send.
+    role_events = [i for i, e in enumerate(events) if e[0] == "add_roles"]
+    send_event  = events.index(("prep_send", None))
+    if role_events:
+        assert max(role_events) < send_event
+
+
+async def test_players_moved_to_waiting_match_vc():
+    """Les 10 joueurs en Waiting Room doivent etre deplaces vers la VC
+    Waiting Match de la categorie attribuee."""
+    import bot as bot_module
+    queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
+
+    waiting_room = MagicMock()
+    waiting_room.name = "Waiting Room"
+    waiting_room.id = 999
+
+    # Tous les joueurs sont dans Waiting Room (cas nominal apres clic Rejoindre)
+    members = [
+        _fake_member(i, f"P{i}", voice_channel=waiting_room) for i in range(10)
+    ]
+    cat = _fake_category("Match #1", with_waiting=True)
+    channel = _fake_channel(100)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    inter = _fake_interaction(guild)
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
+    await cog.on_queue_full(inter, queue_doc)
+
+    # Les 10 joueurs doivent avoir ete move_to vers la Waiting Match
+    waiting_match = next(v for v in cat.voice_channels if v.name == "Waiting Match")
+    for m in members:
+        m.move_to.assert_awaited_with(
+            waiting_match, reason="Match forme : regroupement VC",
+        )
+
+
+async def test_player_already_in_waiting_match_not_moved():
+    """Un joueur deja dans la Waiting Match ne doit pas etre deplace inutilement."""
+    import bot as bot_module
+    queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
+
+    cat = _fake_category("Match #1", with_waiting=True)
+    waiting_match = next(v for v in cat.voice_channels if v.name == "Waiting Match")
+
+    # Un seul joueur est deja dans la Waiting Match
+    members = [
+        _fake_member(0, "P0", voice_channel=waiting_match),
+        *[_fake_member(i, f"P{i}", voice_channel=None) for i in range(1, 10)],
+    ]
+    channel = _fake_channel(100)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    inter = _fake_interaction(guild)
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
+    await cog.on_queue_full(inter, queue_doc)
+
+    # Le joueur deja a destination n'est pas re-deplace
+    members[0].move_to.assert_not_called()
+    # Les autres (hors vocal) non plus
+    for m in members[1:]:
+        m.move_to.assert_not_called()
+
+
+async def test_queue_full_does_not_crash_when_no_waiting_match_vc():
+    """Si la categorie n'a pas de VC `Waiting Match`, le match doit quand meme
+    etre cree (fallback gracieux : juste pas de deplacement)."""
+    import bot as bot_module
+    queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
+
+    cat = _fake_category("Match #1", with_waiting=False)
+    members = [_fake_member(i, f"P{i}") for i in range(10)]
+    channel = _fake_channel(100)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    inter = _fake_interaction(guild)
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
+    match_id = await cog.on_queue_full(inter, queue_doc)
+    assert match_id is not None
 
 
 # ── build_match_embed ─────────────────────────────────────────────

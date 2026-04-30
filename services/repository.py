@@ -341,13 +341,84 @@ def set_match_status(
     get_matches_col(db, guild_id).update_one({"_id": match_id}, {"$set": update})
 
 
+def transition_match_status(
+    db: Database,
+    guild_id: int | str,
+    match_id: Any,
+    *,
+    from_status: str,
+    to_status: str,
+) -> Mapping[str, Any] | None:
+    """Atomic CAS : passe le match de `from_status` a `to_status` uniquement si
+    le doc est encore dans l'etat attendu. Renvoie le doc apres maj, ou None
+    si la transition n'a pas eu lieu (concurrent : un autre vote a deja valide).
+
+    Set `validated_at` si la cible est `validated_a` ou `validated_b`.
+    """
+    from datetime import datetime, timezone
+    update: dict[str, Any] = {"status": to_status}
+    if to_status in ("validated_a", "validated_b"):
+        update["validated_at"] = datetime.now(timezone.utc)
+    return get_matches_col(db, guild_id).find_one_and_update(
+        {"_id": match_id, "status": from_status},
+        {"$set": update},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+def claim_match_for_elo(
+    db: Database,
+    guild_id: int | str,
+    match_id: Any,
+) -> Mapping[str, Any] | None:
+    """Atomic claim : marque `elo_applied=True` uniquement si non deja applique.
+
+    Empeche la double-application d'ELO si la verification HenrikDev re-tente
+    apres un crash entre `apply_match_validation` et `set_match_henrik_verified`.
+
+    Returns:
+        Le doc apres claim si on a bien obtenu le verrou, None si deja claime.
+    """
+    from datetime import datetime, timezone
+    return get_matches_col(db, guild_id).find_one_and_update(
+        {
+            "_id":         match_id,
+            "status":      {"$in": ["validated_a", "validated_b"]},
+            "elo_applied": {"$ne": True},
+        },
+        {"$set": {
+            "elo_applied":    True,
+            "elo_applied_at": datetime.now(timezone.utc),
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+def release_elo_claim(
+    db: Database,
+    guild_id: int | str,
+    match_id: Any,
+) -> None:
+    """Annule le claim si l'application ELO a echoue (rollback)."""
+    get_matches_col(db, guild_id).update_one(
+        {"_id": match_id},
+        {"$unset": {"elo_applied": "", "elo_applied_at": ""}},
+    )
+
+
 def find_validated_unverified(
     db: Database, guild_id: int | str, cutoff_dt,
 ) -> list[Mapping[str, Any]]:
-    """Matches validated_a/b avec validated_at <= cutoff_dt et henrik_verified absent/false."""
+    """Matches validated_a/b avec validated_at <= cutoff_dt, sans Henrik
+    verifie ET sans ELO deja applique (elo_applied != True).
+
+    Le filtre sur `elo_applied` evite que le tick suivant ne retraite un match
+    dont l'ELO a deja ete applique mais dont `henrik_verified` n'a pas ete
+    ecrit (crash entre les deux operations)."""
     return list(get_matches_col(db, guild_id).find({
         "status":       {"$in": ["validated_a", "validated_b"]},
         "validated_at": {"$lte": cutoff_dt},
+        "elo_applied":  {"$ne": True},
         "$or": [
             {"henrik_verified": {"$exists": False}},
             {"henrik_verified": False},

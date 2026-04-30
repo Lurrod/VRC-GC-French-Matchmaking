@@ -204,3 +204,82 @@ def test_change_dataclass_fields():
     assert loser.delta == 0   # 0 -> max(0, -15) -> 0, donc delta = 0
     assert loser.old_elo == 0
     assert loser.new_elo == 0
+
+
+# ── Zero-sum garanti avec multiplicateurs (fix audit #1) ──────────
+def _seed_baseline_elo(db, guild_id: int, ids: range, baseline: int) -> None:
+    """Donne a chaque joueur un ELO de depart suffisant pour eviter le floor."""
+    col = repository.get_elo_col(db, guild_id)
+    col.delete_many({})
+    for i in ids:
+        col.insert_one({
+            "_id": str(i), "name": f"P{i}",
+            "elo": baseline, "wins": 0, "losses": 0,
+        })
+
+
+def test_zero_sum_with_uniform_multipliers():
+    """Multiplicateurs tous a 1.0 -> comportement plat, sum(deltas)=0."""
+    import bot as bot_module
+    _seed_baseline_elo(bot_module.db, 42, range(10), baseline=10000)
+    match = _make_match(status="validated_a", elo=2400)
+    multipliers = {str(i): 1.0 for i in range(10)}
+    outcome = apply_match_validation(
+        bot_module.db, 42, match, multipliers=multipliers,
+    )
+    assert sum(c.delta for c in outcome.changes) == 0
+
+
+def test_zero_sum_with_mixed_multipliers():
+    """Multiplicateurs heterogenes (extremes inclus) -> sum(deltas)=0 quand
+    aucun joueur ne touche le plancher."""
+    import bot as bot_module
+    _seed_baseline_elo(bot_module.db, 42, range(10), baseline=10000)
+    match = _make_match(status="validated_a", elo=2400)
+    multipliers = {
+        # team_a (gagnants)
+        "0": 1.3, "1": 1.3, "2": 1.0, "3": 0.7, "4": 0.7,
+        # team_b (perdants)
+        "5": 1.3, "6": 0.7, "7": 1.0, "8": 1.1, "9": 0.9,
+    }
+    outcome = apply_match_validation(
+        bot_module.db, 42, match, multipliers=multipliers,
+    )
+    assert sum(c.delta for c in outcome.changes) == 0
+
+
+def test_zero_sum_with_all_clamped_max():
+    """Cas pathologique : tous gagnants clampes a 1.3, tous perdants a 0.7.
+    Sans le fix, sum_w=6.5, sum_l=3.5 -> deficit. Avec le fix : sum=0."""
+    import bot as bot_module
+    _seed_baseline_elo(bot_module.db, 42, range(10), baseline=10000)
+    match = _make_match(status="validated_a", elo=2400)
+    multipliers = {
+        **{str(i): 1.3 for i in range(5)},      # team_a
+        **{str(i): 0.7 for i in range(5, 10)},  # team_b
+    }
+    outcome = apply_match_validation(
+        bot_module.db, 42, match, multipliers=multipliers,
+    )
+    assert sum(c.delta for c in outcome.changes) == 0
+    # Total gagnants = 5 * 15 = 75 (zero-sum strict)
+    winner_sum = sum(c.delta for c in outcome.changes if c.win)
+    assert winner_sum == 75
+
+
+def test_winner_with_higher_mult_gains_more():
+    """Distribution interne : un gagnant a mult eleve gagne plus que ses
+    coequipiers (la garantie zero-sum n'ecrase pas la difference de perf)."""
+    import bot as bot_module
+    _seed_baseline_elo(bot_module.db, 42, range(10), baseline=10000)
+    match = _make_match(status="validated_a", elo=2400)
+    multipliers = {
+        "0": 1.3, "1": 0.7,
+        "2": 1.0, "3": 1.0, "4": 1.0,
+        **{str(i): 1.0 for i in range(5, 10)},
+    }
+    outcome = apply_match_validation(
+        bot_module.db, 42, match, multipliers=multipliers,
+    )
+    by_uid = {c.user_id: c for c in outcome.changes}
+    assert by_uid["0"].delta > by_uid["2"].delta > by_uid["1"].delta

@@ -15,6 +15,7 @@ seuls les wins/losses du serveur modifient l'ELO.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import discord
@@ -65,10 +66,13 @@ class RiotLinkCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # 2) Verifier l'existence du compte Riot + recuperer le rang actuel (display)
+        # 2) Verifier l'existence du compte Riot + recuperer le rang actuel (display).
+        # Les appels HenrikDev sont synchrones (`requests`) et bloqueraient l'event
+        # loop Discord pendant ~10s en cas de lenteur API. On les execute dans un
+        # thread pour preserver la reactivite du bot.
         try:
-            account = self.riot_client.get_account(name, tag)
-            mmr     = self.riot_client.get_current_mmr(region, name, tag)
+            account = await asyncio.to_thread(self.riot_client.get_account, name, tag)
+            mmr     = await asyncio.to_thread(self.riot_client.get_current_mmr, region, name, tag)
         except PlayerNotFound:
             await interaction.followup.send(f"❌ Joueur **{name}#{tag}** introuvable.", ephemeral=True)
             return

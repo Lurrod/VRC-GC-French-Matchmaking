@@ -45,13 +45,22 @@ def apply_match_validation(
     multipliers: dict[str, float] | None = None,
 ) -> MatchEloOutcome:
     """
-    Distribue les ELO en une seule passe.
+    Distribue les ELO en une seule passe, **zero-sum garanti** :
+    sum(deltas_gagnants) == -sum(deltas_perdants) AVANT le plancher a 0.
 
-    Si `multipliers` est fourni (dict user_id -> mult Henrik/ACS), pondere :
-      - gagnant : delta = +round(base_gain * mult)
-      - perdant : delta = -round(base_loss * (2 - mult))
-    Si un joueur est absent du dict, mult=1.0 (delta plat).
-    Si `multipliers` est None, comportement plat pour tout le monde.
+    Le total d'une equipe est toujours `n * base_change`. Les multiplicateurs
+    redistribuent ce total au sein de l'equipe :
+      - gagnant : poids = mult           (mult eleve -> plus gros gain)
+      - perdant : poids = (2 - mult)     (mult eleve -> plus faible perte)
+    Le total par equipe est donc preserve quoi qu'il arrive aux multiplicateurs
+    individuels (clamping inclus).
+
+    Si un joueur est absent du dict, mult=1.0 (poids = 1).
+    Si `multipliers` est None, distribution plate (chacun base_change).
+
+    Note : le plancher a 0 ELO sur les perdants (`max(0, old + delta)`) peut
+    casser le zero-sum strict si un perdant tombe sous 0 ; c'est volontaire
+    (on ne descend jamais sous 0).
 
     Args:
         db:          Database mongomock/pymongo
@@ -77,19 +86,26 @@ def apply_match_validation(
     mults    = multipliers or {}
     weighted = multipliers is not None
     elo_col  = repository.get_elo_col(db, guild_id)
+
+    winner_mults = [float(mults.get(str(p["id"]), 1.0)) for p in winners]
+    loser_mults  = [float(mults.get(str(p["id"]), 1.0)) for p in losers]
+
+    winner_deltas = _distribute_team_deltas(
+        team_total=+base_gain * len(winners),
+        multipliers=winner_mults,
+        is_winner=True,
+    )
+    loser_deltas = _distribute_team_deltas(
+        team_total=-base_loss * len(losers),
+        multipliers=loser_mults,
+        is_winner=False,
+    )
+
     changes: list[PlayerEloChange] = []
-
-    for p in winners:
-        uid   = str(p["id"])
-        mult  = float(mults.get(uid, 1.0))
-        delta = round(base_gain * mult)
-        changes.append(_apply_player(elo_col, p, delta=+delta, win=True, multiplier=mult))
-
-    for p in losers:
-        uid   = str(p["id"])
-        mult  = float(mults.get(uid, 1.0))
-        delta = round(base_loss * (2.0 - mult))
-        changes.append(_apply_player(elo_col, p, delta=-delta, win=False, multiplier=mult))
+    for p, delta, mult in zip(winners, winner_deltas, winner_mults):
+        changes.append(_apply_player(elo_col, p, delta=delta, win=True, multiplier=mult))
+    for p, delta, mult in zip(losers, loser_deltas, loser_mults):
+        changes.append(_apply_player(elo_col, p, delta=delta, win=False, multiplier=mult))
 
     return MatchEloOutcome(
         avg_elo=avg_elo,
@@ -98,6 +114,46 @@ def apply_match_validation(
         changes=tuple(changes),
         weighted=weighted,
     )
+
+
+def _distribute_team_deltas(
+    *,
+    team_total: int,
+    multipliers: list[float],
+    is_winner: bool,
+) -> list[int]:
+    """Distribue `team_total` (signe) sur n joueurs, ponderee par les multiplicateurs.
+
+    Garantit `sum(deltas) == team_total` exactement, meme apres arrondi entier.
+
+    Le poids individuel est :
+      - gagnant : mult            (mult eleve -> part plus grosse du gain)
+      - perdant : (2 - mult)      (mult eleve = bonne perf -> part plus petite de la perte)
+    """
+    n = len(multipliers)
+    if n == 0:
+        return []
+    weights = [m if is_winner else (2.0 - m) for m in multipliers]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        weights = [1.0] * n
+        total_weight = float(n)
+
+    raw     = [team_total * w / total_weight for w in weights]
+    deltas  = [int(round(r)) for r in raw]
+    diff    = team_total - sum(deltas)
+    if diff != 0:
+        # Distribue le residu d'arrondi sur les joueurs au plus gros reste
+        # fractionnaire, dans le sens approprie.
+        residuals = sorted(
+            range(n),
+            key=lambda i: (raw[i] - deltas[i]) * (1 if diff > 0 else -1),
+            reverse=True,
+        )
+        step = 1 if diff > 0 else -1
+        for k in range(abs(diff)):
+            deltas[residuals[k % n]] += step
+    return deltas
 
 
 def _apply_player(

@@ -265,30 +265,41 @@ class VoteView(discord.ui.View):
         count_a = sum(1 for v in votes.values() if v == "a")
         count_b = sum(1 for v in votes.values() if v == "b")
 
-        # 6) Majorite ?
-        new_status = None
+        # 6) Majorite atteinte ? Transition atomique (CAS) pour eviter
+        #    qu'un vote concurrent ne valide deux fois et ne declenche
+        #    `on_validated` plusieurs fois.
+        target_status = None
         if count_a >= MAJORITY_THRESHOLD:
-            new_status = "validated_a"
+            target_status = "validated_a"
         elif count_b >= MAJORITY_THRESHOLD:
-            new_status = "validated_b"
+            target_status = "validated_b"
 
-        if new_status:
-            repository.set_match_status(
-                self.db, inter.guild_id, match["_id"], new_status,
+        transitioned_doc = None
+        if target_status:
+            transitioned_doc = repository.transition_match_status(
+                self.db, inter.guild_id, match["_id"],
+                from_status="pending", to_status=target_status,
             )
-            updated = repository.get_match(self.db, inter.guild_id, match["_id"])
+            if transitioned_doc is not None:
+                updated = transitioned_doc
+            else:
+                # Un autre vote concurrent a deja valide. On re-fetch pour
+                # afficher l'etat reel sans tirer `on_validated` de notre cote.
+                updated = repository.get_match(self.db, inter.guild_id, match["_id"]) or updated
 
         # 7) Edit du message (embed maj, view retiree si valide)
         embed = build_match_embed_from_doc(updated, inter.guild.name)
-        if new_status:
+        if updated.get("status") in ("validated_a", "validated_b"):
             await inter.response.edit_message(embed=embed, view=None)
         else:
             await inter.response.edit_message(embed=embed, view=self)
 
-        # 8) Hook Phase 6 : MAJ ELO
-        if new_status and self.on_validated:
+        # 8) Hook Phase 6 : MAJ ELO. Tire UNIQUEMENT si la transition CAS a
+        #    reussi de notre cote (i.e. ce vote-ci est celui qui a fait
+        #    basculer le match).
+        if transitioned_doc is not None and self.on_validated:
             try:
-                await self.on_validated(inter, updated)
+                await self.on_validated(inter, transitioned_doc)
             except Exception as e:
                 print(f"[vote] on_validated a leve : {e}")
 
@@ -365,6 +376,27 @@ class MatchCog(commands.Cog):
 
         plan = plan_match(players, free_category=free_cat_name, rng=self.rng)
 
+        # ── Etape 1 : roles AVANT le message ────────────────────
+        # Le salon match-preparation peut etre gate par le role Match #N ;
+        # si on envoie le message avant d'attribuer le role, certains joueurs
+        # ne verront pas l'annonce. On grant en premier.
+        for uid in player_ids:
+            member = guild.get_member(int(uid))
+            if member is None:
+                continue
+            await _revoke_queue_role(member)
+            await _grant_match_role(member, free_cat_name)
+
+        leader_member = guild.get_member(int(plan.lobby_leader.id))
+        if leader_member is not None:
+            await _grant_match_role(leader_member, MATCH_HOST_ROLE_NAME)
+
+        # ── Etape 2 : deplacement vocal Waiting Room -> Waiting Match ──
+        # Le bot rassemble les 10 joueurs dans la salle vocale dediee de la
+        # categorie attribuee. Sans matchmaking VC ici, on a un trou de UX.
+        await self._move_players_to_match_vc(guild, free_cat_name, player_ids)
+
+        # ── Etape 3 : message d'annonce avec embed + VoteView ───
         mentions = " ".join(f"<@{p.id}>" for p in players)
         embed    = build_match_embed(plan, guild.name)
         msg = await prep_channel.send(
@@ -373,6 +405,7 @@ class MatchCog(commands.Cog):
             view=self.vote_view,
         )
 
+        # ── Etape 4 : persistance du match ──────────────────────
         match_id = repository.create_match(
             self.db,
             guild_id=guild.id,
@@ -385,21 +418,7 @@ class MatchCog(commands.Cog):
             channel_id=prep_channel.id,
         )
 
-        # Retire "En Queue" et donne le role de la categorie (Match #1/2/3)
-        for uid in player_ids:
-            member = guild.get_member(int(uid))
-            if member is not None:
-                await _revoke_queue_role(member)
-                await _grant_match_role(member, free_cat_name)
-
-        # Donne le role "Match Host" au lobby leader pour qu'il puisse
-        # poster le screen de fin de game dans le salon dedie.
-        leader_member = guild.get_member(int(plan.lobby_leader.id))
-        if leader_member is not None:
-            await _grant_match_role(leader_member, MATCH_HOST_ROLE_NAME)
-
-        # Reset queue + repose le message setup-queue dans le salon d'origine
-        # pour qu'une nouvelle queue soit immediatement disponible.
+        # ── Etape 5 : reset queue + repose setup-queue ──────────
         repository.delete_active_queue(self.db, guild.id)
         queue_cog = self.bot.get_cog("QueueCog")
         if queue_cog is not None:
@@ -408,6 +427,40 @@ class MatchCog(commands.Cog):
             except Exception as e:
                 print(f"[match] echec re-post setup-queue : {e}")
         return match_id
+
+    async def _move_players_to_match_vc(
+        self, guild, free_cat_name: str, player_ids: list[str],
+    ) -> None:
+        """Deplace les 10 joueurs dans la VC `Waiting Match` de la categorie
+        attribuee. Skip silencieusement les joueurs hors vocal ou deja sur place.
+
+        Tous les joueurs valides ont ete auto-deplaces dans `Waiting Room` au
+        clic sur Rejoindre (cf. queue_v2._move_to_waiting_room) ; on les
+        regroupe ici dans la VC du match formee.
+        """
+        category = discord.utils.get(guild.categories, name=free_cat_name)
+        if category is None:
+            return
+        waiting_match = discord.utils.get(
+            category.voice_channels, name="Waiting Match",
+        )
+        if waiting_match is None:
+            return
+        for uid in player_ids:
+            member = guild.get_member(int(uid))
+            if member is None:
+                continue
+            voice = getattr(member, "voice", None)
+            if voice is None or getattr(voice, "channel", None) is None:
+                continue  # joueur hors vocal -> rien a deplacer
+            if voice.channel.id == waiting_match.id:
+                continue  # deja a destination
+            try:
+                await member.move_to(
+                    waiting_match, reason="Match forme : regroupement VC",
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     async def _fail(self, interaction, queue_doc, reason: str) -> None:
         repository.delete_active_queue(self.db, interaction.guild.id)
@@ -592,7 +645,11 @@ class MatchCog(commands.Cog):
           - Henrik a trouve les multiplicateurs ACS (ELO pondere), OU
           - `force_apply` est True (timeout atteint -> ELO plat).
         Sinon : ne fait rien, le match sera retente au prochain tick.
-        Marque le match `henrik_verified` apres application pour bloquer les retries.
+
+        Idempotence : on **claim** le match (`elo_applied=True`) AVANT
+        d'appliquer l'ELO. Si le claim echoue (deja applique ailleurs), on
+        skip. Si l'application ELO leve, on relache le claim pour permettre
+        un retry au prochain tick.
         """
         multipliers: dict[str, float] | None = None
         if self.henrik_client is not None:
@@ -602,12 +659,23 @@ class MatchCog(commands.Cog):
             # Pas trouve, pas en timeout -> on retentera dans 1 min.
             return
 
+        # Claim atomique : seul le premier appel passe. Empeche la double
+        # application en cas de crash entre apply_match_validation et
+        # set_match_henrik_verified, ou de tick concurrent.
+        claimed = repository.claim_match_for_elo(
+            self.db, guild.id, match_doc["_id"],
+        )
+        if claimed is None:
+            return  # Deja applique par un tick precedent.
+
         try:
             outcome = apply_match_validation(
                 self.db, guild.id, match_doc, multipliers=multipliers,
             )
         except Exception as e:
             print(f"[match] apply_match_validation a leve : {e}")
+            # Rollback du claim pour permettre un retry au prochain tick.
+            repository.release_elo_claim(self.db, guild.id, match_doc["_id"])
             return
 
         repository.set_match_henrik_verified(
@@ -650,7 +718,11 @@ class MatchCog(commands.Cog):
             return None
 
         after = match_doc.get("created_at") or match_doc.get("validated_at")
-        summary = find_henrik_custom_match(
+        # `find_henrik_custom_match` fait un appel HTTP synchrone (`requests`).
+        # On l'execute dans un thread pour ne pas bloquer l'event loop Discord
+        # pendant le timeout (jusqu'a 10s par appel).
+        summary = await asyncio.to_thread(
+            find_henrik_custom_match,
             self.henrik_client,
             region=str(leader_riot.get("region", "eu")),
             leader_name=str(leader_riot.get("name", "")),

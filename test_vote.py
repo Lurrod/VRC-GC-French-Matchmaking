@@ -632,3 +632,113 @@ async def test_vote_validation_does_not_touch_elo():
     # Aucun doc ELO cree : l'ELO sera applique uniquement par _verify_match.
     for i in range(10):
         assert elo_col.find_one({"_id": str(i)}) is None
+
+
+# ── Atomicite : transition_match_status (fix audit #2) ────────────
+def test_transition_match_status_succeeds_from_pending():
+    import bot as bot_module
+    match_id = _seed_match(bot_module.db)
+    res = repository.transition_match_status(
+        bot_module.db, 42, match_id,
+        from_status="pending", to_status="validated_a",
+    )
+    assert res is not None
+    assert res["status"] == "validated_a"
+    assert res["validated_at"] is not None
+
+
+def test_transition_match_status_fails_when_already_validated():
+    """Garantie d'atomicite : si un autre vote concurrent a deja valide,
+    une seconde transition ne reussit pas (renvoie None)."""
+    import bot as bot_module
+    match_id = _seed_match(bot_module.db)
+    repository.set_match_status(bot_module.db, 42, match_id, "validated_a")
+
+    res = repository.transition_match_status(
+        bot_module.db, 42, match_id,
+        from_status="pending", to_status="validated_b",
+    )
+    assert res is None
+
+
+async def test_concurrent_votes_only_fire_on_validated_once():
+    """Deux votes votant simultanement pour des camps opposes au seuil
+    ne doivent declencher `on_validated` qu'une seule fois."""
+    import bot as bot_module
+    _seed_match(bot_module.db)
+
+    fired = []
+    async def on_validated(inter, match_doc):
+        fired.append(match_doc.get("status"))
+
+    view = VoteView(bot_module.db, on_validated=on_validated)
+    guild = _fake_guild()
+
+    # 6 votes 'a', 6 votes 'b' (10 joueurs, vote modifiable pas necessaire ici).
+    # On atteint la majorite via 7 votes 'a' d'abord ; un 8e vote arrive ensuite
+    # pour 'b' alors que le match est deja valide -> ne doit pas re-tirer.
+    for uid in range(7):
+        inter = _fake_interaction(_fake_member(uid), guild)
+        await view.vote_a.callback(inter)
+
+    # Vote tardif pour 'b' (le match est deja validated_a)
+    inter = _fake_interaction(_fake_member(7), guild)
+    await view.vote_b.callback(inter)
+
+    assert fired == ["validated_a"]
+
+
+# ── Idempotence ELO : claim_match_for_elo (fix audit #3) ──────────
+def test_claim_match_for_elo_succeeds_first_time():
+    import bot as bot_module
+    match_id = _seed_match(bot_module.db)
+    repository.set_match_status(bot_module.db, 42, match_id, "validated_a")
+
+    claim = repository.claim_match_for_elo(bot_module.db, 42, match_id)
+    assert claim is not None
+    assert claim["elo_applied"] is True
+
+
+def test_claim_match_for_elo_returns_none_when_already_claimed():
+    """Empeche la double-application d'ELO : seul le premier claim passe."""
+    import bot as bot_module
+    match_id = _seed_match(bot_module.db)
+    repository.set_match_status(bot_module.db, 42, match_id, "validated_a")
+
+    first = repository.claim_match_for_elo(bot_module.db, 42, match_id)
+    second = repository.claim_match_for_elo(bot_module.db, 42, match_id)
+    assert first is not None
+    assert second is None
+
+
+def test_claim_match_for_elo_rejects_non_validated_match():
+    import bot as bot_module
+    match_id = _seed_match(bot_module.db)
+    # Status reste 'pending', pas de claim possible
+    claim = repository.claim_match_for_elo(bot_module.db, 42, match_id)
+    assert claim is None
+
+
+def test_release_elo_claim_allows_retry():
+    """Si l'application ELO leve, on relache le claim pour re-essayer."""
+    import bot as bot_module
+    match_id = _seed_match(bot_module.db)
+    repository.set_match_status(bot_module.db, 42, match_id, "validated_a")
+
+    repository.claim_match_for_elo(bot_module.db, 42, match_id)
+    repository.release_elo_claim(bot_module.db, 42, match_id)
+    retry = repository.claim_match_for_elo(bot_module.db, 42, match_id)
+    assert retry is not None
+
+
+def test_find_validated_unverified_excludes_elo_applied():
+    """Un match dont l'ELO est deja applique ne doit pas re-apparaitre dans
+    la queue de verification (eviter le double credit)."""
+    import bot as bot_module
+    match_id = _seed_match(bot_module.db)
+    repository.set_match_status(bot_module.db, 42, match_id, "validated_a")
+    repository.claim_match_for_elo(bot_module.db, 42, match_id)
+
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=1)
+    matches = repository.find_validated_unverified(bot_module.db, 42, cutoff)
+    assert all(m["_id"] != match_id for m in matches)
