@@ -133,10 +133,16 @@ class HenrikDevClient:
             h["Authorization"] = self.api_key
         return h
 
-    def _get(self, path: str) -> dict[str, Any]:
-        cached = self._cache.get(path)
-        if cached is not None:
-            return cached
+    def _get(self, path: str, *, cache: bool = True) -> dict[str, Any]:
+        """GET HenrikDev. Si `cache=False`, ne lit ni n'ecrit dans le cache TTL.
+
+        Utile pour les endpoints qui doivent rester frais (polling de match
+        history pour detecter un custom recent : avec cache 1h, le 1er retry
+        renvoie pour toujours la reponse stale 'pas encore indexe')."""
+        if cache:
+            cached = self._cache.get(path)
+            if cached is not None:
+                return cached
 
         url = f"{BASE_URL}{path}"
         try:
@@ -159,7 +165,8 @@ class HenrikDevClient:
         if data.get("status") and data["status"] >= 400:
             raise RiotApiError(f"API status {data['status']}")
 
-        self._cache.set(path, data)
+        if cache:
+            self._cache.set(path, data)
         return data
 
     # ── Endpoints publics ─────────────────────────────────────────
@@ -220,7 +227,10 @@ class HenrikDevClient:
         path = f"/v3/matches/{region}/{name}/{tag}?size={size}"
         if mode:
             path += f"&filter={mode}"
-        data = self._get(path)
+        # Pas de cache : cet endpoint est appele en boucle pour detecter
+        # l'apparition d'un custom recent. Avec le TTL de 1h, le 1er retry
+        # renverrait pour toujours le stale "pas encore indexe".
+        data = self._get(path, cache=False)
         return [_parse_match(entry) for entry in data.get("data", [])]
 
     def get_match_details(self, matchid: str) -> MatchSummary:

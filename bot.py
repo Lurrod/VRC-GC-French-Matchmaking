@@ -23,8 +23,6 @@ TOKEN     = os.environ.get("DISCORD_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 
 ELO_START = elo_calc.ELO_START
-WIN_ELO   = list(elo_calc.WIN_ELO)
-LOSE_ELO  = list(elo_calc.LOSE_ELO)
 MAPS      = list(elo_calc.MAPS)
 
 # ── MongoDB ────────────────────────────────────────────────────

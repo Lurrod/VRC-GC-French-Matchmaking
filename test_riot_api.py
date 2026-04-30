@@ -194,6 +194,36 @@ def test_clear_cache_forces_refresh():
     assert session.get.call_count == 2
 
 
+def test_get_match_history_bypasses_cache():
+    """Le polling de match_history doit toujours faire un appel reseau frais.
+    Sans bypass, le 1er retry renverrait stale 'pas encore indexe' pendant 1h."""
+    session = MagicMock()
+    session.get.side_effect = [
+        _mock_response(200, {"status": 200, "data": []}),
+        _mock_response(200, {"status": 200, "data": []}),
+        _mock_response(200, {"status": 200, "data": [{
+            "metadata": {"matchid": "x", "mode": "Custom Game", "map": "Bind",
+                         "game_start": 0, "rounds_played": 0},
+            "teams": {}, "players": {"all_players": []},
+        }]}),
+    ]
+    client = HenrikDevClient(session=session)
+    client.get_match_history("eu", "Player", "EUW", mode="custom")
+    client.get_match_history("eu", "Player", "EUW", mode="custom")
+    res = client.get_match_history("eu", "Player", "EUW", mode="custom")
+
+    assert session.get.call_count == 3
+    assert len(res) == 1
+
+
+def test_get_match_history_does_not_pollute_cache():
+    """Apres un appel match_history, aucune entree n'est ajoutee au cache."""
+    session = _make_session(_mock_response(200, {"status": 200, "data": []}))
+    client = HenrikDevClient(session=session)
+    client.get_match_history("eu", "Player", "EUW", mode="custom")
+    assert all("/matches/" not in k for k in client._cache._store.keys())
+
+
 # ── Headers ───────────────────────────────────────────────────────
 def test_api_key_added_to_headers_when_provided():
     session = _make_session(_mock_response(200, {"status": 200, "data": {}}))
