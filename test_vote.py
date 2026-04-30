@@ -231,7 +231,7 @@ def test_build_embed_from_doc_pending():
         "votes": {"0": "a", "1": "a"},
     }
     embed = build_match_embed_from_doc(doc, "G")
-    assert "en cours" in embed.title.lower()
+    assert "reportez le vainqueur" in embed.title.lower()
     votes_field = next(f for f in embed.fields if "Votes" in f.name)
     assert "**2**" in votes_field.value
 

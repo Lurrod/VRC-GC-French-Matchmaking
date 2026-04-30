@@ -126,7 +126,7 @@ Quand 10 joueurs sont en queue :
 
 Apres formation, 2 boutons attaches au message du match :
 
-  [Team A gagne]    [Team B gagne]
+  [Team A a gagne]    [Team B a gagne]
 
   Regles :
     - SEULS les 10 participants peuvent voter

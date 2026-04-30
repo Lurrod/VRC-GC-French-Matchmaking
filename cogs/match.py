@@ -109,7 +109,7 @@ def build_match_embed(plan, guild_name: str) -> discord.Embed:
         inline=False,
     )
 
-    embed.set_footer(text=f"{guild_name} · Votez quelle equipe a gagne ci-dessous")
+    embed.set_footer(text=f"{guild_name} · Reportez ci-dessous quelle equipe a remporte la partie")
     return embed
 
 
@@ -136,7 +136,7 @@ def build_match_embed_from_doc(doc: dict, guild_name: str) -> discord.Embed:
     elif status == "contested":
         title, color, footer_extra = "⚠️ Match en attente admin", 0xe67e22, "Vote en timeout"
     else:
-        title, color, footer_extra = "🎯 Match en cours - Votez !", 0x5865f2, "Cliquez sur l'equipe gagnante"
+        title, color, footer_extra = "🎯 Match termine - Reportez le vainqueur", 0x5865f2, "Cliquez sur l'equipe qui a remporte la partie"
 
     embed = discord.Embed(
         title=title, color=color, timestamp=datetime.now(timezone.utc),
@@ -220,7 +220,7 @@ def build_elo_changes_embed(outcome: MatchEloOutcome, match_doc: dict, guild_nam
 
 # ── VoteView ──────────────────────────────────────────────────────
 class VoteView(discord.ui.View):
-    """View persistante : Team A gagne / Team B gagne."""
+    """View persistante : reporter le vainqueur du match (Team A / Team B)."""
 
     def __init__(self, db, on_validated=None) -> None:
         super().__init__(timeout=None)
@@ -293,13 +293,13 @@ class VoteView(discord.ui.View):
                 print(f"[vote] on_validated a leve : {e}")
 
     @discord.ui.button(
-        label="Team A gagne", style=discord.ButtonStyle.primary, custom_id=VOTE_A_BTN_ID,
+        label="Team A a gagne", style=discord.ButtonStyle.primary, custom_id=VOTE_A_BTN_ID,
     )
     async def vote_a(self, inter: discord.Interaction, button: discord.ui.Button):
         await self._vote(inter, "a")
 
     @discord.ui.button(
-        label="Team B gagne", style=discord.ButtonStyle.primary, custom_id=VOTE_B_BTN_ID,
+        label="Team B a gagne", style=discord.ButtonStyle.primary, custom_id=VOTE_B_BTN_ID,
     )
     async def vote_b(self, inter: discord.Interaction, button: discord.ui.Button):
         await self._vote(inter, "b")
