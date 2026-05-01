@@ -165,7 +165,15 @@ async def refresh_leaderboard_channel(
         return
     _LAST_REFRESH_AT[guild.id] = now
 
-    chan = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL_NAME)
+    # On accepte tout salon dont le nom contient "leaderboard" (insensible
+    # a la casse) pour supporter les variantes decoratives type
+    # "🏆・leaderboard", "leaderboard-elo", etc. Coherent avec
+    # `_is_leaderboard_channel` dans bot.py.
+    needle = LEADERBOARD_CHANNEL_NAME.lower()
+    chan = next(
+        (c for c in guild.text_channels if needle in (c.name or "").lower()),
+        None,
+    )
     if chan is None:
         return
 
