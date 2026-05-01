@@ -15,10 +15,12 @@ On cache les reponses 1h pour limiter les appels.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final
+from urllib.parse import quote
 
 import requests
 
@@ -26,6 +28,8 @@ import requests
 BASE_URL: Final[str] = "https://api.henrikdev.xyz/valorant"
 DEFAULT_TIMEOUT: Final[int] = 10
 CACHE_TTL_SECONDS: Final[int] = 3600  # 1h
+RETRY_ATTEMPTS:    Final[int] = 3      # 1 essai initial + 2 retries
+RETRY_BACKOFF_BASE: Final[float] = 1.0  # delais : 1s, 2s, 4s
 
 
 VALID_REGIONS: Final[frozenset[str]] = frozenset({"eu", "na", "ap", "kr", "latam", "br"})
@@ -126,6 +130,12 @@ class HenrikDevClient:
         self.api_key = api_key or os.environ.get("HENRIK_API_KEY")
         self.session = session or requests.Session()
         self._cache  = _TTLCache(cache_ttl)
+        # `requests.Session` n'est pas safe pour des appels concurrents
+        # multi-thread (le pool de connexions urllib3 peut se corrompre).
+        # Le bot exporte plusieurs appels Henrik via `asyncio.to_thread`,
+        # donc on serialise les requetes via ce lock. Impact perf
+        # negligeable (volume Henrik < 1 req/sec sur ce bot).
+        self._session_lock = threading.Lock()
 
     def _headers(self) -> dict[str, str]:
         h = {"Accept": "application/json"}
@@ -145,33 +155,58 @@ class HenrikDevClient:
                 return cached
 
         url = f"{BASE_URL}{path}"
-        try:
-            resp = self.session.get(url, headers=self._headers(), timeout=DEFAULT_TIMEOUT)
-        except requests.RequestException as e:
-            raise RiotApiError(f"Erreur reseau : {e}") from e
+        last_err: Exception | None = None
+        # Retry uniquement sur erreurs reseau et 5xx (transitoires).
+        # 404, 429, 4xx autres : pas de retry (echec deterministe).
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                with self._session_lock:
+                    resp = self.session.get(url, headers=self._headers(), timeout=DEFAULT_TIMEOUT)
+            except requests.RequestException as e:
+                last_err = e
+                if attempt < RETRY_ATTEMPTS - 1:
+                    time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                    continue
+                raise RiotApiError(f"Erreur reseau apres {RETRY_ATTEMPTS} tentatives : {e}") from e
 
-        if resp.status_code == 404:
-            raise PlayerNotFound(f"Joueur introuvable : {path}")
-        if resp.status_code == 429:
-            raise RateLimited("HenrikDev a renvoye 429 (rate limited)")
-        if resp.status_code >= 400:
-            raise RiotApiError(f"HTTP {resp.status_code} : {resp.text[:200]}")
+            if resp.status_code == 404:
+                raise PlayerNotFound(f"Joueur introuvable : {path}")
+            if resp.status_code == 429:
+                raise RateLimited("HenrikDev a renvoye 429 (rate limited)")
+            if 500 <= resp.status_code < 600:
+                last_err = RiotApiError(f"HTTP {resp.status_code} : {resp.text[:200]}")
+                if attempt < RETRY_ATTEMPTS - 1:
+                    time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                    continue
+                raise last_err
+            if resp.status_code >= 400:
+                raise RiotApiError(f"HTTP {resp.status_code} : {resp.text[:200]}")
 
-        try:
-            data = resp.json()
-        except ValueError as e:
-            raise RiotApiError(f"Reponse non-JSON : {e}") from e
+            try:
+                data = resp.json()
+            except ValueError as e:
+                raise RiotApiError(f"Reponse non-JSON : {e}") from e
 
-        if data.get("status") and data["status"] >= 400:
-            raise RiotApiError(f"API status {data['status']}")
+            if data.get("status") and data["status"] >= 400:
+                # Si HenrikDev renvoie un status applicatif 5xx, on retry aussi.
+                if 500 <= int(data["status"]) < 600 and attempt < RETRY_ATTEMPTS - 1:
+                    last_err = RiotApiError(f"API status {data['status']}")
+                    time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                    continue
+                raise RiotApiError(f"API status {data['status']}")
 
-        if cache:
-            self._cache.set(path, data)
-        return data
+            if cache:
+                self._cache.set(path, data)
+            return data
+
+        # Non-atteignable normalement, mais garde-fou.
+        raise RiotApiError(
+            f"_get : echec apres {RETRY_ATTEMPTS} tentatives. last_err={last_err}",
+        )
 
     # ── Endpoints publics ─────────────────────────────────────────
     def get_account(self, name: str, tag: str) -> Account:
-        data = self._get(f"/v1/account/{name}/{tag}")
+        data = self._get(f"/v1/account/{quote(name, safe='')}/{quote(tag, safe='')}")
         d = data.get("data", {})
         return Account(
             puuid=d.get("puuid", ""),
@@ -183,7 +218,7 @@ class HenrikDevClient:
     def get_current_mmr(self, region: str, name: str, tag: str) -> CurrentMMR:
         if region not in VALID_REGIONS:
             raise ValueError(f"Region invalide : {region}")
-        data = self._get(f"/v2/mmr/{region}/{name}/{tag}")
+        data = self._get(f"/v2/mmr/{region}/{quote(name, safe='')}/{quote(tag, safe='')}")
         c = data.get("data", {}).get("current_data", {})
         return CurrentMMR(
             elo=int(c.get("elo") or 0),
@@ -198,7 +233,7 @@ class HenrikDevClient:
     ) -> list[HistoricalMatch]:
         if region not in VALID_REGIONS:
             raise ValueError(f"Region invalide : {region}")
-        data = self._get(f"/v1/mmr-history/{region}/{name}/{tag}")
+        data = self._get(f"/v1/mmr-history/{region}/{quote(name, safe='')}/{quote(tag, safe='')}")
         out: list[HistoricalMatch] = []
         for entry in data.get("data", []):
             ts = entry.get("date_raw")
@@ -224,9 +259,11 @@ class HenrikDevClient:
         """Recupere les matchs recents d'un joueur. `mode` filtre cote API ('custom', etc.)."""
         if region not in VALID_REGIONS:
             raise ValueError(f"Region invalide : {region}")
-        path = f"/v3/matches/{region}/{name}/{tag}?size={size}"
+        safe_name = quote(name, safe="")
+        safe_tag = quote(tag, safe="")
+        path = f"/v3/matches/{region}/{safe_name}/{safe_tag}?size={int(size)}"
         if mode:
-            path += f"&filter={mode}"
+            path += f"&filter={quote(str(mode), safe='')}"
         # Pas de cache : cet endpoint est appele en boucle pour detecter
         # l'apparition d'un custom recent. Avec le TTL de 1h, le 1er retry
         # renverrait pour toujours le stale "pas encore indexe".
@@ -235,7 +272,7 @@ class HenrikDevClient:
 
     def get_match_details(self, matchid: str) -> MatchSummary:
         """Detail complet d'un match a partir de son id."""
-        data = self._get(f"/v2/match/{matchid}")
+        data = self._get(f"/v2/match/{quote(matchid, safe='')}")
         d = data.get("data", {})
         if not d:
             raise RiotApiError(f"Match {matchid} : payload vide")

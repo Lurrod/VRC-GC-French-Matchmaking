@@ -1,15 +1,21 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
+import logging
 import os
-import asyncio
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 import random
 from pymongo import MongoClient
-from leaderboard_img import generate_leaderboard
+from pymongo.collection import Collection
 
 from services import elo_calc, repository
 from services.riot_api import HenrikDevClient
+from services.leaderboard_refresh import (
+    build_leaderboard_payload,
+    refresh_leaderboard_channel,
+)
 
 # ── Charge .env si present (sans planter si python-dotenv absent) ──
 try:
@@ -26,13 +32,25 @@ ELO_START = elo_calc.ELO_START
 MAPS      = list(elo_calc.MAPS)
 
 # ── MongoDB ────────────────────────────────────────────────────
-client = MongoClient(MONGO_URL, tz_aware=True, tzinfo=timezone.utc)
+# retryWrites/retryReads sont True par defaut depuis pymongo 4.x mais on les
+# explicite pour resilience aux blips reseau. serverSelectionTimeoutMS=5000
+# evite de bloquer >30s sur Mongo down -> Discord renvoie "L'application n'a
+# pas repondu". connectTimeoutMS=5000 limite le handshake initial.
+client = MongoClient(
+    MONGO_URL,
+    tz_aware=True,
+    tzinfo=timezone.utc,
+    retryWrites=True,
+    retryReads=True,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+)
 db     = client["elobot"]
 
-def get_elo_col(guild_id):
+def get_elo_col(guild_id: int | str) -> Collection:
     return repository.get_elo_col(db, guild_id)
 
-def get_bypass_col():
+def get_bypass_col() -> Collection:
     return repository.get_bypass_col(db)
 
 def get_player(col, member: discord.Member):
@@ -146,15 +164,27 @@ async def _setup_perm_error(inter: discord.Interaction, error):
 @app_commands.describe(role="Le role qui aura acces a toutes les commandes")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def bypass(interaction: discord.Interaction, role: discord.Role):
+    if role.id == interaction.guild_id or role.is_default():
+        await interaction.response.send_message(
+            "❌ Impossible d'accorder le bypass a @everyone — cela donnerait l'acces admin a tout le serveur.",
+            ephemeral=True,
+        )
+        return
+    if role.managed:
+        await interaction.response.send_message(
+            "❌ Impossible d'accorder le bypass a un role gere par une integration (bot, booster, etc.).",
+            ephemeral=True,
+        )
+        return
     set_bypass_role(interaction.guild_id, role.id)
     embed = discord.Embed(
         title="🔓 Bypass activé !",
         description=f"Le role {role.mention} a maintenant acces a toutes les commandes du bot.",
         color=0xe67e22,
-        timestamp=datetime.now()
+        timestamp=datetime.now(timezone.utc)
     )
     embed.set_footer(text=f"Configuré par {interaction.user.display_name}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── Helper V2 : ELO serveur avec fallback ──────────────────────
 def _match_elo_for_member(guild_id: int, user_id: int) -> int:
@@ -202,7 +232,7 @@ async def win(
         title="Resultats - Victoire enregistree !",
         description=f"Avg ELO du groupe : **{avg_elo}** -> +**{gain}** ELO chacun",
         color=0x2ecc71,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
     )
     for member in players:
         doc = get_player(col, member)
@@ -246,7 +276,7 @@ async def lose(
         title="Resultats - Defaite enregistree !",
         description=f"Avg ELO du groupe : **{avg_elo}** -> -**{loss}** ELO chacun",
         color=0xe74c3c,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
     )
     for member in players:
         doc = get_player(col, member)
@@ -269,16 +299,29 @@ async def map_pick(interaction: discord.Interaction):
         await interaction.response.send_message("🚫 Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True)
         return
     chosen = random.choice(MAPS)
-    embed = discord.Embed(title="🗺️ Map sélectionnée !", description=f"## {chosen}", color=0x9b59b6, timestamp=datetime.now())
+    embed = discord.Embed(title="🗺️ Map sélectionnée !", description=f"## {chosen}", color=0x9b59b6, timestamp=datetime.now(timezone.utc))
     embed.set_footer(text=f"Tirage par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
 @tree.command(name="coinflip", description="Fait un pile ou face")
 async def coinflip(interaction: discord.Interaction):
     result = random.choice(["Pile", "Face"])
-    embed  = discord.Embed(title="🪙 Pile ou Face !", description=f"## {result}", color=0xf1c40f, timestamp=datetime.now())
+    embed  = discord.Embed(title="🪙 Pile ou Face !", description=f"## {result}", color=0xf1c40f, timestamp=datetime.now(timezone.utc))
     embed.set_footer(text=f"Lancé par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
+
+
+# ── Refresh leaderboard helper ─────────────────────────────────
+async def _refresh_leaderboard_safe(guild: discord.Guild | None) -> None:
+    """Rafraichit le leaderboard du salon `#leaderboard` apres une
+    modification d'ELO. Silencieux si le bot n'est pas pret ou si la guild
+    n'a pas de salon dedie."""
+    if guild is None or bot.user is None:
+        return
+    try:
+        await refresh_leaderboard_channel(guild, db, bot.user.id)
+    except Exception as e:
+        logger.exception("[leaderboard] refresh a leve")
 
 
 # ── /leaderboard ───────────────────────────────────────────────
@@ -293,95 +336,10 @@ async def leaderboard(interaction: discord.Interaction):
     public = _is_leaderboard_channel(interaction)
     ephemeral = not public
     await interaction.response.defer(ephemeral=ephemeral)
-    col  = get_elo_col(interaction.guild_id)
-    docs = list(col.find().sort("elo", -1))
-    if not docs:
+    file, view = await build_leaderboard_payload(interaction.guild, db)
+    if file is None:
         await interaction.followup.send("Aucun joueur enregistre.", ephemeral=True)
         return
-    all_players = []
-    rank = 1
-    for doc in docs:
-        uid    = doc["_id"]
-        member = interaction.guild.get_member(int(uid))
-        # Si le membre n'est pas dans le cache du bot, on l'inclut quand meme
-        # avec son nom stocke en base (avatar par defaut Discord pour fallback).
-        if member is not None:
-            ava_url = str(member.display_avatar.replace(format="png", size=64).url)
-            display_name = member.display_name or doc.get("name", uid)
-        else:
-            ava_url = f"https://cdn.discordapp.com/embed/avatars/{int(uid) % 6}.png"
-            display_name = doc.get("name", str(uid))
-        all_players.append({
-            "rank":       rank,
-            "name":       display_name,
-            "elo":        doc["elo"],
-            "wins":       doc.get("wins", 0),
-            "losses":     doc.get("losses", 0),
-            "kills":      doc.get("kills", 0),
-            "deaths":     doc.get("deaths", 0),
-            "avatar_url": ava_url,
-        })
-        rank += 1
-    if not all_players:
-        await interaction.followup.send("Aucun joueur enregistre.", ephemeral=True)
-        return
-    PAGE_SIZE   = 15
-    total_pages = max(1, (len(all_players) + PAGE_SIZE - 1) // PAGE_SIZE)
-    loop        = asyncio.get_event_loop()
-
-    async def build_page(page: int) -> discord.File:
-        start = page * PAGE_SIZE
-        chunk = all_players[start:start + PAGE_SIZE]
-        buf = await loop.run_in_executor(None, lambda: generate_leaderboard(chunk, server_name=interaction.guild.name))
-        return discord.File(buf, filename="leaderboard.png")
-
-    class LeaderboardView(discord.ui.View):
-        def __init__(self, page: int):
-            super().__init__(timeout=300)
-            self.page = page
-            self.update_buttons()
-        def update_buttons(self):
-            self.prev_btn.disabled = self.page == 0
-            self.next_btn.disabled = self.page >= total_pages - 1
-            self.page_btn.label    = f"Page {self.page + 1} / {total_pages}"
-        async def _go(self, inter: discord.Interaction, new_page: int):
-            if new_page < 0 or new_page >= total_pages:
-                if not inter.response.is_done():
-                    await inter.response.defer()
-                return
-            self.page = new_page
-            self.update_buttons()
-            try:
-                if not inter.response.is_done():
-                    await inter.response.defer()
-                file = await build_page(self.page)
-                await inter.followup.edit_message(
-                    message_id=inter.message.id,
-                    attachments=[file],
-                    view=self,
-                )
-            except Exception:
-                import traceback
-                traceback.print_exc()
-                try:
-                    await inter.followup.send(
-                        "Erreur lors du changement de page. Réessaie.",
-                        ephemeral=True,
-                    )
-                except Exception:
-                    pass
-        @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
-        async def prev_btn(self, inter: discord.Interaction, button: discord.ui.Button):
-            await self._go(inter, self.page - 1)
-        @discord.ui.button(label="Page 1 / 1", style=discord.ButtonStyle.grey, disabled=True)
-        async def page_btn(self, inter: discord.Interaction, button: discord.ui.Button):
-            pass
-        @discord.ui.button(emoji="➡️", style=discord.ButtonStyle.secondary)
-        async def next_btn(self, inter: discord.Interaction, button: discord.ui.Button):
-            await self._go(inter, self.page + 1)
-
-    view = LeaderboardView(page=0)
-    file = await build_page(0)
     await interaction.followup.send(file=file, view=view, ephemeral=ephemeral)
 
 # ── /resetelo ──────────────────────────────────────────────────
@@ -395,9 +353,10 @@ async def resetelo(interaction: discord.Interaction, joueur: discord.Member = No
     if all:
         count = col.count_documents({})
         col.update_many({}, {"$set": {"elo": 0, "wins": 0, "losses": 0}})
-        embed = discord.Embed(title="🔄 Reset général !", description=f"ELO de **{count} joueur(s)** remis a 0.", color=0xe74c3c, timestamp=datetime.now())
+        embed = discord.Embed(title="🔄 Reset général !", description=f"ELO de **{count} joueur(s)** remis a 0.", color=0xe74c3c, timestamp=datetime.now(timezone.utc))
         embed.set_footer(text=f"Reset par {interaction.user.display_name}")
         await interaction.response.send_message(embed=embed)
+        await _refresh_leaderboard_safe(interaction.guild)
         return
     if joueur is None:
         await interaction.response.send_message("Mentionne un joueur ou utilise all:True.", ephemeral=True)
@@ -405,13 +364,14 @@ async def resetelo(interaction: discord.Interaction, joueur: discord.Member = No
     doc = get_player(col, joueur)
     old = doc["elo"]
     col.update_one({"_id": str(joueur.id)}, {"$set": {"elo": 0, "wins": 0, "losses": 0}})
-    embed = discord.Embed(title="🔄 ELO réinitialisé !", color=0x95a5a6, timestamp=datetime.now())
+    embed = discord.Embed(title="🔄 ELO réinitialisé !", color=0x95a5a6, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur", value=joueur.mention, inline=True)
     embed.add_field(name="Ancien ELO", value=str(old), inline=True)
     embed.add_field(name="Nouvel ELO", value="0", inline=True)
     embed.set_thumbnail(url=joueur.display_avatar.url)
     embed.set_footer(text=f"Reset par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
+    await _refresh_leaderboard_safe(interaction.guild)
 
 # ── /elomodify ─────────────────────────────────────────────────
 @tree.command(name="elomodify", description="Ajoute ou enleve de l'ELO a un joueur")
@@ -423,6 +383,12 @@ async def resetelo(interaction: discord.Interaction, joueur: discord.Member = No
 async def elomodify(interaction: discord.Interaction, joueur: discord.Member, action: str, montant: int):
     if not has_access(interaction):
         await interaction.response.send_message("Pas la permission.", ephemeral=True)
+        return
+    if montant <= 0:
+        await interaction.response.send_message(
+            "❌ Le montant doit etre strictement positif. Utilise l'action `- Enlever` pour retirer de l'ELO.",
+            ephemeral=True,
+        )
         return
     col = get_elo_col(interaction.guild_id)
     doc = get_player(col, joueur)
@@ -438,12 +404,13 @@ async def elomodify(interaction: discord.Interaction, joueur: discord.Member, ac
         label = f"-{montant}"
         title = "➖ ELO retiré"
     col.update_one({"_id": str(joueur.id)}, {"$set": {"elo": new}})
-    embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
+    embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur",       value=joueur.mention,                    inline=True)
     embed.add_field(name="Modification", value=label,                             inline=True)
     embed.add_field(name="Nouvel ELO",   value=f"**{new}** (etait {old})",        inline=True)
     embed.set_footer(text=f"Par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
+    await _refresh_leaderboard_safe(interaction.guild)
 
 # ── /winmodify ─────────────────────────────────────────────────
 @tree.command(name="winmodify", description="Ajoute ou enleve des victoires a un joueur")
@@ -455,6 +422,12 @@ async def elomodify(interaction: discord.Interaction, joueur: discord.Member, ac
 async def winmodify(interaction: discord.Interaction, joueur: discord.Member, action: str, montant: int):
     if not has_access(interaction):
         await interaction.response.send_message("Pas la permission.", ephemeral=True)
+        return
+    if montant <= 0:
+        await interaction.response.send_message(
+            "❌ Le montant doit etre strictement positif.",
+            ephemeral=True,
+        )
         return
     col = get_elo_col(interaction.guild_id)
     doc = get_player(col, joueur)
@@ -470,12 +443,13 @@ async def winmodify(interaction: discord.Interaction, joueur: discord.Member, ac
         label = f"-{montant}"
         title = "➖ Victoires retirées"
     col.update_one({"_id": str(joueur.id)}, {"$set": {"wins": new}})
-    embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
+    embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur",        value=joueur.mention,             inline=True)
     embed.add_field(name="Modification",  value=label,                      inline=True)
     embed.add_field(name="Nouveau total", value=f"**{new}** (etait {old})", inline=True)
     embed.set_footer(text=f"Par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
+    await _refresh_leaderboard_safe(interaction.guild)
 
 # ── /stats ─────────────────────────────────────────────────────
 
@@ -488,6 +462,12 @@ async def winmodify(interaction: discord.Interaction, joueur: discord.Member, ac
 async def losemodify(interaction: discord.Interaction, joueur: discord.Member, action: str, montant: int):
     if not has_access(interaction):
         await interaction.response.send_message("Pas la permission.", ephemeral=True)
+        return
+    if montant <= 0:
+        await interaction.response.send_message(
+            "❌ Le montant doit etre strictement positif.",
+            ephemeral=True,
+        )
         return
     col = get_elo_col(interaction.guild_id)
     doc = get_player(col, joueur)
@@ -503,12 +483,13 @@ async def losemodify(interaction: discord.Interaction, joueur: discord.Member, a
         label = f"-{montant}"
         title = "➖ Défaites retirées"
     col.update_one({"_id": str(joueur.id)}, {"$set": {"losses": new}})
-    embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
+    embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur", value=joueur.mention, inline=True)
     embed.add_field(name="Modification", value=label, inline=True)
     embed.add_field(name="Nouveau total", value=f"**{new}** (etait {old})", inline=True)
     embed.set_footer(text=f"Par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
+    await _refresh_leaderboard_safe(interaction.guild)
 
 @tree.command(name="stats", description="Affiche les statistiques ELO d'un joueur")
 @app_commands.describe(joueur="Le joueur dont tu veux voir les stats")
@@ -525,8 +506,17 @@ async def stats(interaction: discord.Interaction, joueur: discord.Member = None)
     losses  = doc.get("losses", 0)
     total   = wins + losses
     winrate = round((wins / total) * 100, 1) if total > 0 else 0
-    rank    = col.count_documents({"elo": {"$gt": elo}}) + 1
-    embed = discord.Embed(title=f"📊 Stats de {joueur.display_name}", color=0x3498db, timestamp=datetime.now())
+    # Rang aligne avec le tri du leaderboard (ELO desc, wins desc, _id asc)
+    # pour eviter qu'un /stats affiche un rang qui ne correspond pas a la
+    # position dans le leaderboard sur les ex-aequo.
+    rank    = col.count_documents({
+        "$or": [
+            {"elo": {"$gt": elo}},
+            {"elo": elo, "wins": {"$gt": wins}},
+            {"elo": elo, "wins": wins, "_id": {"$lt": str(joueur.id)}},
+        ],
+    }) + 1
+    embed = discord.Embed(title=f"📊 Stats de {joueur.display_name}", color=0x3498db, timestamp=datetime.now(timezone.utc))
     embed.set_thumbnail(url=joueur.display_avatar.url)
     embed.add_field(name="🏅 ELO",       value=f"**{elo}**",            inline=True)
     embed.add_field(name="🏆 Rang",      value=f"**#{rank}**",          inline=True)
@@ -549,7 +539,7 @@ async def clear(interaction: discord.Interaction, nombre: int):
         return
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=nombre)
-    embed = discord.Embed(title="🗑️ Messages supprimés", description=f"**{len(deleted)}** message(s) supprime(s).", color=0xe74c3c, timestamp=datetime.now())
+    embed = discord.Embed(title="🗑️ Messages supprimés", description=f"**{len(deleted)}** message(s) supprime(s).", color=0xe74c3c, timestamp=datetime.now(timezone.utc))
     embed.set_footer(text=f"Par {interaction.user.display_name}")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -565,7 +555,7 @@ async def help_cmd(interaction: discord.Interaction, type: str = "membres"):
         if not has_access(interaction):
             await interaction.response.send_message("Pas la permission.", ephemeral=True)
             return
-        embed = discord.Embed(title="⚙️ Commandes Admin", color=0xe74c3c, timestamp=datetime.now())
+        embed = discord.Embed(title="⚙️ Commandes Admin", color=0xe74c3c, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="/setup",               value="Crée la catégorie et les salons (`leaderboard`, `queue`, `matchs`) et pose le message de queue", inline=False)
         embed.add_field(name="/win @j1..@j5",        value="Victoire — gain proportionnel à l'avg ELO Riot des joueurs (V2)", inline=False)
         embed.add_field(name="/lose @j1..@j5",       value="Défaite — perte proportionnelle à l'avg ELO Riot des joueurs (V2)", inline=False)
@@ -580,7 +570,7 @@ async def help_cmd(interaction: discord.Interaction, type: str = "membres"):
         embed.set_footer(text=f"Demande par {interaction.user.display_name}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
-        embed = discord.Embed(title="📖 Commandes disponibles", color=0x3498db, timestamp=datetime.now())
+        embed = discord.Embed(title="📖 Commandes disponibles", color=0x3498db, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="/leaderboard", value="Classement ELO du serveur", inline=False)
         embed.add_field(name="/stats @joueur", value="Stats d'un joueur. Sans mention = tes propres stats", inline=False)
         embed.add_field(name="/help", value="Affiche cette aide", inline=False)
@@ -597,7 +587,7 @@ async def bypass_error(interaction: discord.Interaction, error):
 @bot.command(name="leaderboard")
 async def leaderboard_prefix(ctx):
     col  = get_elo_col(ctx.guild.id)
-    docs = list(col.find().sort("elo", -1).limit(10))
+    docs = list(col.find().sort([("elo", -1), ("wins", -1), ("_id", 1)]).limit(10))
     if not docs:
         await ctx.send("Aucun joueur enregistre.")
         return
@@ -612,7 +602,7 @@ async def leaderboard_prefix(ctx):
     if not lines:
         await ctx.send("Aucun joueur enregistre.")
         return
-    embed = discord.Embed(title="Classement ELO", description="\n".join(lines), color=0xf1c40f, timestamp=datetime.now())
+    embed = discord.Embed(title="Classement ELO", description="\n".join(lines), color=0xf1c40f, timestamp=datetime.now(timezone.utc))
     embed.set_footer(text=ctx.guild.name)
     await ctx.send(embed=embed)
 
@@ -630,8 +620,14 @@ async def stats_prefix(ctx, member: discord.Member = None):
     losses  = doc.get("losses", 0)
     total   = wins + losses
     winrate = round((wins / total) * 100, 1) if total > 0 else 0
-    rank    = col.count_documents({"elo": {"$gt": elo}}) + 1
-    embed = discord.Embed(title=f"Stats de {member.display_name}", color=0x3498db, timestamp=datetime.now())
+    rank    = col.count_documents({
+        "$or": [
+            {"elo": {"$gt": elo}},
+            {"elo": elo, "wins": {"$gt": wins}},
+            {"elo": elo, "wins": wins, "_id": {"$lt": str(member.id)}},
+        ],
+    }) + 1
+    embed = discord.Embed(title=f"Stats de {member.display_name}", color=0x3498db, timestamp=datetime.now(timezone.utc))
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🏅 ELO",       value=f"**{elo}**",            inline=True)
     embed.add_field(name="🏆 Rang",      value=f"**#{rank}**",          inline=True)
@@ -658,7 +654,7 @@ async def win_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = Non
         title="🏆 Résultats — Victoire enregistrée !",
         description=f"Avg ELO du groupe : **{avg_elo}** -> +**{gain}** ELO chacun",
         color=0x2ecc71,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
     )
     for member in players:
         doc = get_player(col, member)
@@ -668,6 +664,7 @@ async def win_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = Non
         embed.add_field(name=member.display_name, value=f"+{gain} ELO -> **{new}**", inline=False)
     embed.set_footer(text=f"Enregistre par {ctx.author.display_name}")
     await ctx.send(embed=embed)
+    await _refresh_leaderboard_safe(ctx.guild)
 
 @bot.command(name="lose")
 async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = None, joueur3: discord.Member = None, joueur4: discord.Member = None, joueur5: discord.Member = None):
@@ -685,7 +682,7 @@ async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = No
         title="💀 Résultats — Défaite enregistrée !",
         description=f"Avg ELO du groupe : **{avg_elo}** -> -**{loss}** ELO chacun",
         color=0xe74c3c,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
     )
     for member in players:
         doc = get_player(col, member)
@@ -695,6 +692,7 @@ async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = No
         embed.add_field(name=member.display_name, value=f"-{loss} ELO -> **{new}**", inline=False)
     embed.set_footer(text=f"Enregistre par {ctx.author.display_name}")
     await ctx.send(embed=embed)
+    await _refresh_leaderboard_safe(ctx.guild)
 
 @bot.command(name="map")
 async def map_prefix(ctx):
@@ -704,7 +702,7 @@ async def map_prefix(ctx):
             await ctx.send("Pas la permission.")
             return
     chosen = random.choice(MAPS)
-    embed = discord.Embed(title="🗺️ Map sélectionnée !", description=f"## {chosen}", color=0x9b59b6, timestamp=datetime.now())
+    embed = discord.Embed(title="🗺️ Map sélectionnée !", description=f"## {chosen}", color=0x9b59b6, timestamp=datetime.now(timezone.utc))
     await ctx.send(embed=embed)
 
 @bot.command(name="resetelo")
@@ -718,11 +716,12 @@ async def resetelo_prefix(ctx, member: discord.Member):
     doc = get_player(col, member)
     old = doc["elo"]
     col.update_one({"_id": str(member.id)}, {"$set": {"elo": 0, "wins": 0, "losses": 0}})
-    embed = discord.Embed(title="🔄 ELO réinitialisé !", color=0x95a5a6, timestamp=datetime.now())
+    embed = discord.Embed(title="🔄 ELO réinitialisé !", color=0x95a5a6, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur", value=member.mention, inline=True)
     embed.add_field(name="Ancien ELO", value=str(old), inline=True)
     embed.add_field(name="Nouvel ELO", value="0", inline=True)
     await ctx.send(embed=embed)
+    await _refresh_leaderboard_safe(ctx.guild)
 
 # ── Système de candidatures ────────────────────────────────────
 CANDIDATURE_CHANNEL = "candidatures"
@@ -736,37 +735,46 @@ class ApplicationModal(discord.ui.Modal, title="Candidature 10mans"):
     experience = discord.ui.TextInput(label="Experiences en tournois / LAN ?", placeholder="Indique les tournois/lans auxquels tu as participe", style=discord.TextStyle.paragraph, required=False, max_length=500)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer immediat : le DM utilisateur (slow Discord rate-limit possible)
+        # et l'envoi sur le salon candidatures peuvent depasser les 3s du
+        # token d'interaction. Le defer libere ce delai.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         cooldown_col = db["candidature_cooldowns"]
         uid = str(interaction.user.id)
         doc = cooldown_col.find_one({"_id": uid})
         if doc:
             last = doc["last_apply"]
-            diff = datetime.now() - last
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            diff = datetime.now(timezone.utc) - last
             if diff.total_seconds() < 3600:
                 remaining = 3600 - diff.total_seconds()
                 minutes = int(remaining // 60)
                 seconds = int(remaining % 60)
-                await interaction.response.send_message(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
+                await interaction.followup.send(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
                 return
-        cooldown_col.update_one({"_id": uid}, {"$set": {"last_apply": datetime.now()}}, upsert=True)
+        cooldown_col.update_one({"_id": uid}, {"$set": {"last_apply": datetime.now(timezone.utc)}}, upsert=True)
         try:
-            await interaction.user.send(embed=discord.Embed(title="✅ Candidature reçue !", description="Merci d'avoir postulé, nous analysons votre profil et nous revenons vers vous le plus vite possible.", color=0x2ecc71, timestamp=datetime.now()))
+            await interaction.user.send(embed=discord.Embed(title="✅ Candidature reçue !", description="Merci d'avoir postulé, nous analysons votre profil et nous revenons vers vous le plus vite possible.", color=0x2ecc71, timestamp=datetime.now(timezone.utc)))
         except discord.Forbidden:
             pass
         channel = discord.utils.get(interaction.guild.text_channels, name=CANDIDATURE_CHANNEL)
         if not channel:
-            await interaction.response.send_message("Salon candidatures introuvable.", ephemeral=True)
+            await interaction.followup.send("Salon candidatures introuvable.", ephemeral=True)
             return
-        embed = discord.Embed(title="📋 Nouvelle candidature", description="🎮 **Candidature Joueur**", color=0x5865f2, timestamp=datetime.now())
+        embed = discord.Embed(title="📋 Nouvelle candidature", description="🎮 **Candidature Joueur**", color=0x5865f2, timestamp=datetime.now(timezone.utc))
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed.add_field(name="👤 Membre", value=interaction.user.mention, inline=True)
         embed.add_field(name="🎮 Pseudo en jeu", value=self.pseudo.value, inline=True)
         embed.add_field(name="🔗 Tracker", value=self.tracker.value, inline=False)
         embed.add_field(name="🏆 Tournois / LAN", value=self.experience.value if self.experience.value else "Aucune", inline=False)
         embed.set_footer(text=f"ID: {interaction.user.id}")
-        view = ApplicationReviewView(applicant_id=interaction.user.id, pseudo=self.pseudo.value)
-        await channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Ta candidature a bien été envoyée !", ephemeral=True)
+        view = ApplicationReviewView()
+        msg = await channel.send(embed=embed, view=view)
+        repository.register_application(
+            db, interaction.guild_id, msg.id, interaction.user.id, is_staff=False,
+        )
+        await interaction.followup.send("✅ Ta candidature a bien été envoyée !", ephemeral=True)
 
 
 class RefuseReasonModal(discord.ui.Modal, title="Raison du refus"):
@@ -777,11 +785,23 @@ class RefuseReasonModal(discord.ui.Modal, title="Raison du refus"):
         self.applicant_id = applicant_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        # CAS atomique : empeche refuse concurrent avec accept (autre admin).
+        # Doit etre fait avant tout side-effect (kick, DM, edit).
+        claimed = repository.claim_application_decision(
+            db, interaction.guild_id, interaction.message.id,
+            status="refused", decided_by=interaction.user.id,
+        )
+        if not claimed:
+            await interaction.response.send_message(
+                "❌ Cette candidature a deja ete traitee par un autre admin.",
+                ephemeral=True,
+            )
+            return
         member = interaction.guild.get_member(self.applicant_id)
         reason_text = self.reason.value if self.reason.value else "Aucune raison fournie."
         if member:
             try:
-                embed_dm = discord.Embed(title="❌ Candidature refusée", description="Désolé, votre candidature n'a pas été retenue, merci de réessayer plus tard.", color=0xe74c3c, timestamp=datetime.now())
+                embed_dm = discord.Embed(title="❌ Candidature refusée", description="Désolé, votre candidature n'a pas été retenue, merci de réessayer plus tard.", color=0xe74c3c, timestamp=datetime.now(timezone.utc))
                 embed_dm.add_field(name="📋 Raison", value=reason_text, inline=False)
                 await member.send(embed=embed_dm)
             except discord.Forbidden:
@@ -804,26 +824,79 @@ class RefuseReasonModal(discord.ui.Modal, title="Raison du refus"):
         await interaction.response.send_message("✅ Candidature refusée et utilisateur kické.", ephemeral=True)
 
 
-class ApplicationReviewView(discord.ui.View):
-    def __init__(self, applicant_id: int, pseudo: str, is_staff: bool = False):
-        super().__init__(timeout=None)
-        self.applicant_id = applicant_id
-        self.pseudo       = pseudo
-        self.is_staff     = is_staff
+def _parse_application_embed(message: discord.Message) -> tuple[int | None, str, bool]:
+    """Extrait (applicant_id, pseudo, is_staff) depuis l'embed d'une
+    candidature. Retourne (None, "", False) si parsing impossible.
 
-    @discord.ui.button(label="Accepter", style=discord.ButtonStyle.success)
+    Permet a `ApplicationReviewView` d'etre persistante (sans state interne)
+    en reconstruisant le contexte depuis le message a chaque clic."""
+    if not message.embeds:
+        return None, "", False
+    embed = message.embeds[0]
+    is_staff = "Staff" in (embed.title or "")
+    applicant_id: int | None = None
+    footer_text = (embed.footer.text or "") if embed.footer else ""
+    if footer_text.startswith("ID:"):
+        try:
+            applicant_id = int(footer_text.split(":", 1)[1].strip())
+        except (ValueError, IndexError):
+            applicant_id = None
+    pseudo = ""
+    for field in embed.fields:
+        if field.name in ("🎮 Pseudo en jeu", "🎮 Pseudo"):
+            pseudo = field.value or ""
+            break
+    return applicant_id, pseudo, is_staff
+
+
+class ApplicationReviewView(discord.ui.View):
+    """Vue persistante : se reconstruit a partir de l'embed du message."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Accepter", style=discord.ButtonStyle.success,
+        custom_id="application_accept",
+    )
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not has_access(interaction):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas la permission de traiter les candidatures.",
+                ephemeral=True,
+            )
+            return
+        # CAS atomique : seul un admin peut decider chaque candidature.
+        # Empeche role grant + kick concurrents si 2 admins cliquent en
+        # meme temps (accept/refuse), et le double DM.
+        claimed = repository.claim_application_decision(
+            db, interaction.guild_id, interaction.message.id,
+            status="accepted", decided_by=interaction.user.id,
+        )
+        if not claimed:
+            await interaction.response.send_message(
+                "❌ Cette candidature a deja ete traitee par un autre admin.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.defer(ephemeral=True)
-        member = interaction.guild.get_member(self.applicant_id)
+        applicant_id, pseudo, is_staff = _parse_application_embed(interaction.message)
+        if applicant_id is None:
+            await interaction.followup.send(
+                "❌ Donnees candidature illisibles (embed corrompu).",
+                ephemeral=True,
+            )
+            return
+        member = interaction.guild.get_member(applicant_id)
         if not member:
             await interaction.followup.send("❌ Membre introuvable.", ephemeral=True)
             return
         try:
             old_embed = interaction.message.embeds[0] if interaction.message.embeds else None
-            new_embed = discord.Embed(title="📋 Candidature acceptée", color=0x2ecc71, timestamp=datetime.now())
+            new_embed = discord.Embed(title="📋 Candidature acceptée", color=0x2ecc71, timestamp=datetime.now(timezone.utc))
             new_embed.set_thumbnail(url=member.display_avatar.url)
             new_embed.add_field(name="👤 Membre", value=member.mention, inline=True)
-            new_embed.add_field(name="🎮 Pseudo", value=self.pseudo, inline=True)
+            new_embed.add_field(name="🎮 Pseudo", value=pseudo, inline=True)
             if old_embed:
                 for field in old_embed.fields:
                     if field.name in ("🔗 Tracker", "🏆 Tournois / LAN", "💼 Poste", "📋 Expériences", "Tracker", "Tournois / LAN", "Poste", "Experiences"):
@@ -831,38 +904,54 @@ class ApplicationReviewView(discord.ui.View):
             new_embed.add_field(name="✅ Accepté par", value=interaction.user.mention, inline=False)
             await interaction.message.edit(embed=new_embed, view=None)
         except Exception as e:
-            print(f"[accept] Edit impossible : {e}")
+            logger.exception("[accept] Edit impossible")
             try:
                 await interaction.message.edit(view=None)
             except Exception:
                 pass
-        role_name = STAFF_ROLE if self.is_staff else PLAYERS_ROLE
+        role_name = STAFF_ROLE if is_staff else PLAYERS_ROLE
         role = discord.utils.get(interaction.guild.roles, name=role_name)
         if role:
             try:
                 await member.add_roles(role)
             except Exception as e:
-                print(f"[accept] Role impossible : {e}")
-        if self.is_staff:
+                logger.exception("[accept] Role impossible")
+        if is_staff:
             members_role = discord.utils.get(interaction.guild.roles, name=PLAYERS_ROLE)
             if members_role:
                 try:
                     await member.add_roles(members_role)
                 except Exception as e:
-                    print(f"[accept] Role Members impossible : {e}")
+                    logger.exception("[accept] Role Members impossible")
         try:
-            await member.edit(nick=self.pseudo)
+            await member.edit(nick=pseudo)
         except Exception:
             pass
         try:
-            await member.send(embed=discord.Embed(title="🎉 Candidature acceptée !", description="Bravo, vous avez été accepté, vous pouvez désormais faire des 10mans !", color=0x2ecc71, timestamp=datetime.now()))
+            await member.send(embed=discord.Embed(title="🎉 Candidature acceptée !", description="Bravo, vous avez été accepté, vous pouvez désormais faire des 10mans !", color=0x2ecc71, timestamp=datetime.now(timezone.utc)))
         except discord.Forbidden:
             pass
         await interaction.followup.send("✅ Candidature acceptée !", ephemeral=True)
 
-    @discord.ui.button(label="Refuser", style=discord.ButtonStyle.danger)
+    @discord.ui.button(
+        label="Refuser", style=discord.ButtonStyle.danger,
+        custom_id="application_refuse",
+    )
     async def refuse(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RefuseReasonModal(applicant_id=self.applicant_id))
+        if not has_access(interaction):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas la permission de traiter les candidatures.",
+                ephemeral=True,
+            )
+            return
+        applicant_id, _pseudo, _is_staff = _parse_application_embed(interaction.message)
+        if applicant_id is None:
+            await interaction.response.send_message(
+                "❌ Donnees candidature illisibles (embed corrompu).",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(RefuseReasonModal(applicant_id=applicant_id))
 
 
 class StaffModal(discord.ui.Modal, title="Candidature Staff"):
@@ -871,37 +960,43 @@ class StaffModal(discord.ui.Modal, title="Candidature Staff"):
     experience = discord.ui.TextInput(label="Experiences", placeholder="Decris tes experiences dans le domaine...", style=discord.TextStyle.paragraph, required=False, max_length=500)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         cooldown_col = db["candidature_cooldowns"]
         uid = str(interaction.user.id)
         doc = cooldown_col.find_one({"_id": uid})
         if doc:
             last = doc["last_apply"]
-            diff = datetime.now() - last
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            diff = datetime.now(timezone.utc) - last
             if diff.total_seconds() < 3600:
                 remaining = 3600 - diff.total_seconds()
                 minutes = int(remaining // 60)
                 seconds = int(remaining % 60)
-                await interaction.response.send_message(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
+                await interaction.followup.send(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
                 return
-        cooldown_col.update_one({"_id": uid}, {"$set": {"last_apply": datetime.now()}}, upsert=True)
+        cooldown_col.update_one({"_id": uid}, {"$set": {"last_apply": datetime.now(timezone.utc)}}, upsert=True)
         try:
-            await interaction.user.send(embed=discord.Embed(title="✅ Candidature reçue !", description="Merci d'avoir postulé, nous analysons votre profil et nous revenons vers vous le plus vite possible.", color=0x2ecc71, timestamp=datetime.now()))
+            await interaction.user.send(embed=discord.Embed(title="✅ Candidature reçue !", description="Merci d'avoir postulé, nous analysons votre profil et nous revenons vers vous le plus vite possible.", color=0x2ecc71, timestamp=datetime.now(timezone.utc)))
         except discord.Forbidden:
             pass
         channel = discord.utils.get(interaction.guild.text_channels, name=CANDIDATURE_CHANNEL)
         if not channel:
-            await interaction.response.send_message("Salon candidatures introuvable.", ephemeral=True)
+            await interaction.followup.send("Salon candidatures introuvable.", ephemeral=True)
             return
-        embed = discord.Embed(title="📋 Nouvelle candidature Staff", description="🎯 **Candidature Coach / Analyst / Manager**", color=0xe67e22, timestamp=datetime.now())
+        embed = discord.Embed(title="📋 Nouvelle candidature Staff", description="🎯 **Candidature Coach / Analyst / Manager**", color=0xe67e22, timestamp=datetime.now(timezone.utc))
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed.add_field(name="👤 Membre",      value=interaction.user.mention,                                    inline=True)
         embed.add_field(name="🎮 Pseudo",       value=self.pseudo.value,                                          inline=True)
         embed.add_field(name="💼 Poste",        value=self.poste.value,                                           inline=False)
         embed.add_field(name="📋 Expériences",  value=self.experience.value if self.experience.value else "Aucune", inline=False)
         embed.set_footer(text=f"ID: {interaction.user.id}")
-        view = ApplicationReviewView(applicant_id=interaction.user.id, pseudo=self.pseudo.value, is_staff=True)
-        await channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Ta candidature a bien été envoyée !", ephemeral=True)
+        view = ApplicationReviewView()
+        msg = await channel.send(embed=embed, view=view)
+        repository.register_application(
+            db, interaction.guild_id, msg.id, interaction.user.id, is_staff=True,
+        )
+        await interaction.followup.send("✅ Ta candidature a bien été envoyée !", ephemeral=True)
 
 
 class RoleChoiceView(discord.ui.View):
@@ -928,7 +1023,9 @@ class WelcomeView(discord.ui.View):
         doc = cooldown_col.find_one({"_id": uid})
         if doc:
             last = doc["last_apply"]
-            diff = datetime.now() - last
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            diff = datetime.now(timezone.utc) - last
             if diff.total_seconds() < 3600:
                 remaining = 3600 - diff.total_seconds()
                 minutes = int(remaining // 60)
@@ -950,7 +1047,7 @@ async def welcome(interaction: discord.Interaction):
         title="Bienvenue sur le serveur 10mans FR",
         description="Bienvenue sur un serveur de **10mans français** accessible exclusivement aux joueurs ayant un ELO d'au moins **High Ascendant**.\n\nPour pouvoir accéder au serveur, merci de cliquer sur le bouton **Postuler** juste en dessous.\n\n**Bon Jeu ! 🍀**",
         color=0x5865f2,
-        timestamp=datetime.now()
+        timestamp=datetime.now(timezone.utc)
     )
     embed.set_footer(text=interaction.guild.name)
     await channel.send(embed=embed, view=WelcomeView())
@@ -977,12 +1074,38 @@ async def _load_v2_cogs() -> None:
 
 @bot.event
 async def setup_hook():
-    await _load_v2_cogs()
+    # Charger les cogs essentiels (queue_v2, match, riot_link). Sans eux,
+    # le bot demarre en mode degrade (slash commands manquantes, queue
+    # inaccessible) sans signaler clairement l'erreur. On log + on
+    # raise pour fail fast plutot que de laisser tourner un bot inutile.
+    try:
+        await _load_v2_cogs()
+    except Exception:
+        # Re-raise : Discord.py va arreter le startup. Mieux qu'un bot
+        # silencieusement cassé en prod.
+        logger.critical("[setup_hook] CRITIQUE : echec chargement des cogs", exc_info=True)
+        raise
+
+
+_synced_once = False
 
 
 @bot.event
 async def on_ready():
+    global _synced_once
+
+    if _synced_once:
+        # on_ready peut etre fire plusieurs fois (reconnects WS) : on sync
+        # uniquement au premier ready pour eviter de spammer Discord et de
+        # subir le temps de propagation global (~1h) inutilement. Idem
+        # pour `add_view` qui referencerait des instances View neuves a
+        # chaque reconnect (leak memoire mineur sur reconnects frequents).
+        logger.info("Bot reconnecte : %s (sync slash skipped)", bot.user)
+        return
+
+    # Premier on_ready uniquement : enregistrement des views persistantes.
     bot.add_view(WelcomeView())
+    bot.add_view(ApplicationReviewView())
 
     # Sync rapide sur une guild specifique si DEV_GUILD_ID est defini.
     # Sinon, sync global (peut prendre jusqu'a 1h pour propager).
@@ -991,14 +1114,22 @@ async def on_ready():
         guild = discord.Object(id=int(dev_guild_id))
         tree.copy_global_to(guild=guild)
         synced = await tree.sync(guild=guild)
-        print(f"Bot connecte : {bot.user} (ID: {bot.user.id})")
-        print(f"{len(synced)} commandes slash synchronisees sur guild {dev_guild_id}.")
+        logger.info("Bot connecte : %s (ID: %s)", bot.user, bot.user.id)
+        logger.info("%d commandes slash synchronisees sur guild %s.", len(synced), dev_guild_id)
     else:
         synced = await tree.sync()
-        print(f"Bot connecte : {bot.user} (ID: {bot.user.id})")
-        print(f"{len(synced)} commandes slash synchronisees (global, propagation jusqu'a 1h).")
+        logger.info("Bot connecte : %s (ID: %s)", bot.user, bot.user.id)
+        logger.info("%d commandes slash synchronisees (global, propagation jusqu'a 1h).", len(synced))
+    _synced_once = True
 
 if __name__ == "__main__":
+    # Configuration logging : niveau INFO + format avec timestamp et logger
+    # name. Permet de filtrer en prod (ex: -e LOG_LEVEL=DEBUG via supervisor).
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    )
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN environment variable not set")
     bot.run(TOKEN)

@@ -43,5 +43,7 @@ def compute_match_elo_change(avg_match_elo: int) -> tuple[int, int]:
     if avg_match_elo < 0:
         raise ValueError(f"avg_match_elo doit etre >= 0, recu {avg_match_elo}")
     change = round(ELO_BASE_CHANGE * avg_match_elo / ELO_REFERENCE)
-    change = max(0, change)
+    # Plancher a 1 pour garantir une progression meme apres reset global
+    # (avg=0 produirait sinon (0, 0) → match joue pour rien).
+    change = max(1, change)
     return change, change

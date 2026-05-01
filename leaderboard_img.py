@@ -62,7 +62,27 @@ BRONZE      = (210, 130, 65)
 
 
 # ── Cache avatars ─────────────────────────────────────────────────
-_AVATAR_CACHE: dict[str, Image.Image] = {}
+from collections import OrderedDict
+
+# LRU bornee : evite que le cache d'avatars croisse indefiniment
+# (1 entree par url unique, jamais TTL'e). Eviction LRU des qu'on
+# depasse `_AVATAR_CACHE_MAXSIZE`.
+_AVATAR_CACHE_MAXSIZE: int = 500
+_AVATAR_CACHE: OrderedDict[str, Image.Image] = OrderedDict()
+
+
+def _avatar_cache_get(url: str) -> Image.Image | None:
+    img = _AVATAR_CACHE.get(url)
+    if img is not None:
+        _AVATAR_CACHE.move_to_end(url)
+    return img
+
+
+def _avatar_cache_set(url: str, img: Image.Image) -> None:
+    _AVATAR_CACHE[url] = img
+    _AVATAR_CACHE.move_to_end(url)
+    while len(_AVATAR_CACHE) > _AVATAR_CACHE_MAXSIZE:
+        _AVATAR_CACHE.popitem(last=False)
 
 
 def _font(size: int, bold: bool = True):
@@ -131,8 +151,9 @@ def _draw_xy_center(draw, text, x_center, y_center, font, color):
 def _fetch_avatar(url: str | None) -> Image.Image | None:
     if not url:
         return None
-    if url in _AVATAR_CACHE:
-        return _AVATAR_CACHE[url]
+    cached = _avatar_cache_get(url)
+    if cached is not None:
+        return cached
     try:
         resp = requests.get(url, timeout=5)
         if resp.status_code != 200:
@@ -142,7 +163,7 @@ def _fetch_avatar(url: str | None) -> Image.Image | None:
         mask = Image.new("L", (AVATAR, AVATAR), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, AVATAR, AVATAR), fill=255)
         a.putalpha(mask)
-        _AVATAR_CACHE[url] = a
+        _avatar_cache_set(url, a)
         return a
     except Exception:
         return None

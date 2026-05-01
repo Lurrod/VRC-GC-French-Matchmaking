@@ -13,6 +13,8 @@ Flux :
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 import discord
@@ -20,6 +22,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from services import repository
+
+logger = logging.getLogger(__name__)
 
 
 JOIN_BTN_ID:  str = "queue_v2:join"
@@ -137,6 +141,9 @@ def build_queue_embed(queue_doc: dict | None, guild: discord.Guild) -> discord.E
 
 
 # ── View persistante ──────────────────────────────────────────────
+_LOCKS_MAXSIZE: int = 128
+
+
 class QueueView(discord.ui.View):
     """View persistante : Rejoindre / Quitter."""
 
@@ -144,12 +151,22 @@ class QueueView(discord.ui.View):
         super().__init__(timeout=None)
         self.db        = db
         self._on_full  = on_full
-        self._locks: dict[int, asyncio.Lock] = {}
+        # OrderedDict + LRU bornee pour eviter une fuite memoire sur bot
+        # multi-guilds longue duree (1 Lock par guild_id, jamais purge).
+        # Une eviction du dict ne libere pas un Lock detenu : la coroutine
+        # qui l'utilise en garde une reference forte.
+        self._locks: OrderedDict[int, asyncio.Lock] = OrderedDict()
 
     def _lock(self, guild_id: int) -> asyncio.Lock:
-        if guild_id not in self._locks:
-            self._locks[guild_id] = asyncio.Lock()
-        return self._locks[guild_id]
+        lock = self._locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[guild_id] = lock
+            while len(self._locks) > _LOCKS_MAXSIZE:
+                self._locks.popitem(last=False)
+        else:
+            self._locks.move_to_end(guild_id)
+        return lock
 
     @discord.ui.button(
         label="Rejoindre", style=discord.ButtonStyle.success, custom_id=JOIN_BTN_ID,
@@ -209,7 +226,31 @@ class QueueView(discord.ui.View):
 
             # 5) trigger formation (Phase 4 — on a un point d'extension)
             if full and self._on_full:
-                asyncio.create_task(self._on_full(inter, queue_doc))
+                asyncio.create_task(self._safe_on_full(inter, queue_doc))
+
+    async def _safe_on_full(
+        self, inter: discord.Interaction, queue_doc: dict,
+    ) -> None:
+        """Invoque `_on_full` en garantissant la liberation de la queue
+        en cas d'exception non capturee, sinon la queue reste en status
+        'forming' et bloque toute nouvelle entree."""
+        try:
+            await self._on_full(inter, queue_doc)
+        except Exception:
+            logger.exception("[queue_v2] _safe_on_full a leve")
+            try:
+                repository.delete_active_queue(self.db, inter.guild_id)
+            except Exception as cleanup_err:
+                logger.exception("[queue_v2] cleanup apres on_full a leve")
+            try:
+                channel = inter.channel
+                if channel is not None:
+                    await channel.send(
+                        f"❌ Erreur lors de la formation du match : `{e}`. "
+                        "La queue a ete liberee, retentez avec /setup-queue.",
+                    )
+            except Exception:
+                pass
 
     @discord.ui.button(
         label="Quitter", style=discord.ButtonStyle.danger, custom_id=LEAVE_BTN_ID,
@@ -257,6 +298,20 @@ class QueueCog(commands.Cog):
         self.db      = db
         self.on_full = on_full
         self.view    = QueueView(db, on_full=on_full)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        """Quand un joueur quitte le serveur (kick, ban, leave), le retirer
+        de la queue active s'il y est. Sans ce handler, sa place reste
+        reservee et la queue se bloque a 9/10 jusqu'a ce qu'un admin
+        force un reset via /close-queue + /setup-queue."""
+        try:
+            await asyncio.to_thread(
+                repository.remove_player_from_queue,
+                self.db, member.guild.id, member.id,
+            )
+        except Exception as e:
+            logger.exception("[queue_v2] on_member_remove a leve")
 
     @app_commands.command(name="setup-queue", description="Pose le message de queue dans ce salon")
     @app_commands.checks.has_permissions(manage_guild=True)

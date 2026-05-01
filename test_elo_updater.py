@@ -12,7 +12,7 @@ from services.elo_updater import (
 
 # ── compute_match_elo_change (formule pure, zero-sum) ─────────────
 @pytest.mark.parametrize("avg,change", [
-    (0,    0),
+    (0,    1),     # plancher : empeche match a zero ELO apres reset global
     (300,  2),
     (2100, 13),     # sous le floor (Immortal-)
     (2400, 15),    # Immortal 1 = baseline
@@ -91,13 +91,18 @@ def test_validated_b_swaps_winners_losers():
 
 def test_winners_get_plus_gain_in_db():
     import bot as bot_module
+    # Seed pre-prod : en prod chaque joueur a au moins LINK_BASE_ELO=2000
+    # via /link-riot. Sans seed, la nouvelle distribution zero-sum
+    # constate que les perdants (a 0 ELO) ne peuvent rien perdre, et
+    # neutralise les gains gagnants pour rester zero-sum.
+    _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
     match = _make_match(elo=2400)  # avg=2400 -> change=15
     apply_match_validation(bot_module.db, 42, match)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 15
+        assert doc["elo"] == 2015  # 2000 + 15
         assert doc["wins"] == 1
         assert doc["losses"] == 0
 
@@ -144,13 +149,14 @@ def test_loser_floored_at_zero():
 def test_high_elo_match_bigger_swings():
     import bot as bot_module
     # Radiant (avg=3000) zero-sum -> change=19
+    _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
     match = _make_match(elo=3000)
     outcome = apply_match_validation(bot_module.db, 42, match)
     assert outcome.gain == 19
     assert outcome.loss == 19
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    assert elo_col.find_one({"_id": "0"})["elo"] == 19
+    assert elo_col.find_one({"_id": "0"})["elo"] == 2019  # 2000 + 19
 
 
 def test_low_elo_match_smaller_swings():
@@ -166,6 +172,12 @@ def test_existing_winner_keeps_history_and_adds_gain():
     import bot as bot_module
     elo_col = repository.get_elo_col(bot_module.db, 42)
     elo_col.insert_one({"_id": "0", "name": "A0", "elo": 200, "wins": 5, "losses": 3})
+    # Seed les autres joueurs avec assez d'ELO pour que les perdants
+    # puissent perdre 15 sans hitter le plancher zero-sum.
+    for i in range(1, 5):
+        elo_col.insert_one({"_id": str(i), "name": f"A{i}", "elo": 2000, "wins": 0, "losses": 0})
+    for i in range(5, 10):
+        elo_col.insert_one({"_id": str(i), "name": f"B{i-5}", "elo": 2000, "wins": 0, "losses": 0})
 
     match = _make_match(elo=2400)
     apply_match_validation(bot_module.db, 42, match)
@@ -192,18 +204,19 @@ def test_mixed_team_avg_elo():
 
 def test_change_dataclass_fields():
     import bot as bot_module
+    _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
     match = _make_match(elo=2400)
     outcome = apply_match_validation(bot_module.db, 42, match)
 
     winner = next(c for c in outcome.changes if c.win)
     assert winner.delta == 15
-    assert winner.old_elo == 0
-    assert winner.new_elo == 15
+    assert winner.old_elo == 2000
+    assert winner.new_elo == 2015
 
     loser = next(c for c in outcome.changes if not c.win)
-    assert loser.delta == 0   # 0 -> max(0, -15) -> 0, donc delta = 0
-    assert loser.old_elo == 0
-    assert loser.new_elo == 0
+    assert loser.delta == -15
+    assert loser.old_elo == 2000
+    assert loser.new_elo == 1985
 
 
 # ── Zero-sum garanti avec multiplicateurs (fix audit #1) ──────────

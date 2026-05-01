@@ -2,7 +2,7 @@
 
 import pytest
 
-from services.peak_calculator import parse_riot_id
+from services.riot_id import parse_riot_id
 
 
 # ── parse_riot_id ─────────────────────────────────────────────────

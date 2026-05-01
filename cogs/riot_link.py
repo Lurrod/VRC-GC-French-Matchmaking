@@ -16,6 +16,7 @@ seuls les wins/losses du serveur modifient l'ELO.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import discord
@@ -23,7 +24,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from services import repository
-from services.peak_calculator import parse_riot_id
+
+logger = logging.getLogger(__name__)
+from services.riot_id import parse_riot_id
 from services.riot_api import (
     HenrikDevClient,
     PlayerNotFound,
@@ -80,7 +83,32 @@ class RiotLinkCog(commands.Cog):
             await interaction.followup.send("⏳ API HenrikDev rate-limited, reessaie dans 1 minute.", ephemeral=True)
             return
         except RiotApiError as e:
-            await interaction.followup.send(f"❌ Erreur Riot API : {e}", ephemeral=True)
+            # Ne pas leak la reponse brute de l'API (contient potentiellement
+            # des details internes ou des extraits HTML d'erreur). On log
+            # cote serveur et on remonte un message generique a l'utilisateur.
+            logger.error(f"[link-riot] RiotApiError pour user={interaction.user.id} : {e!r}", exc_info=True)
+            await interaction.followup.send(
+                "❌ Erreur API Riot temporaire. Reessaie dans quelques instants.",
+                ephemeral=True,
+            )
+            return
+
+        # 2.5) Dedup PUUID : un compte Riot ne peut etre lie qu'a un
+        # seul compte Discord par serveur. Sans ce check, un joueur
+        # pourrait farmer plusieurs fois le seed LINK_BASE_ELO en liant
+        # le meme compte Riot a plusieurs comptes Discord, et tenir 2
+        # places en queue avec un seul compte de jeu.
+        existing = await asyncio.to_thread(
+            repository.find_riot_account_by_puuid,
+            self.db, interaction.guild_id, account.puuid,
+        )
+        if existing is not None and str(existing.get("_id")) != str(interaction.user.id):
+            await interaction.followup.send(
+                f"❌ Le compte Riot **{name}#{tag}** est deja lie a un autre "
+                "membre du serveur. Un compte Riot ne peut etre lie qu'a un "
+                "seul compte Discord par serveur.",
+                ephemeral=True,
+            )
             return
 
         # 3) Seed atomique de l'ELO de depart (idempotent)

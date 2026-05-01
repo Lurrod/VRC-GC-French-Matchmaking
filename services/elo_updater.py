@@ -9,7 +9,9 @@ Le gain/loss est proportionnel a la moyenne d'effective_elo (Riot) des
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
+
+from pymongo import ReturnDocument
 
 from services import elo_calc, repository
 
@@ -45,22 +47,23 @@ def apply_match_validation(
     multipliers: dict[str, float] | None = None,
 ) -> MatchEloOutcome:
     """
-    Distribue les ELO en une seule passe, **zero-sum garanti** :
-    sum(deltas_gagnants) == -sum(deltas_perdants) AVANT le plancher a 0.
+    Distribue les ELO en une seule passe, **zero-sum strict** :
+    sum(deltas_gagnants) + sum(deltas_perdants) == 0, plancher a 0 ELO inclus.
 
-    Le total d'une equipe est toujours `n * base_change`. Les multiplicateurs
+    Le total d'une equipe est `n * base_change`. Les multiplicateurs
     redistribuent ce total au sein de l'equipe :
       - gagnant : poids = mult           (mult eleve -> plus gros gain)
       - perdant : poids = (2 - mult)     (mult eleve -> plus faible perte)
     Le total par equipe est donc preserve quoi qu'il arrive aux multiplicateurs
-    individuels (clamping inclus).
+    individuels.
 
     Si un joueur est absent du dict, mult=1.0 (poids = 1).
     Si `multipliers` est None, distribution plate (chacun base_change).
 
-    Note : le plancher a 0 ELO sur les perdants (`max(0, old + delta)`) peut
-    casser le zero-sum strict si un perdant tombe sous 0 ; c'est volontaire
-    (on ne descend jamais sous 0).
+    Plancher a 0 : si un perdant a moins d'ELO que la perte calculee, son
+    delta est clamp a -old_elo (ne descend pas sous 0). La portion non-
+    perdable est retiree des gains gagnants pour preserver le zero-sum
+    et eviter une injection nette d'ELO dans le systeme.
 
     Args:
         db:          Database mongomock/pymongo
@@ -101,11 +104,42 @@ def apply_match_validation(
         is_winner=False,
     )
 
+    # Pre-fetch des ELO actuels des perdants pour clamper a 0 sans
+    # injecter d'ELO dans le systeme. Sans ce traitement, chaque ELO
+    # "non-perdable" (ex: perdant a 5 ELO doit perdre 15 -> ne perd que
+    # 5, le diff de 10 reste cree dans le systeme via les gains
+    # gagnants intacts) genere une inflation cumulative.
+    loser_old_elos: list[int] = []
+    for p in losers:
+        doc = elo_col.find_one({"_id": str(p["id"])})
+        loser_old_elos.append(
+            int(doc.get("elo", elo_calc.ELO_START)) if doc else elo_calc.ELO_START
+        )
+    clamped_loser_deltas: list[int] = []
+    unrecoverable = 0  # somme >= 0 du "manque a perdre"
+    for old_elo, delta in zip(loser_old_elos, loser_deltas):
+        # delta est negatif. La perte maximale possible est -old_elo.
+        max_loss_delta = -old_elo
+        clamped = max(max_loss_delta, delta)  # delta plus proche de 0
+        unrecoverable += clamped - delta      # >= 0
+        clamped_loser_deltas.append(clamped)
+
+    if unrecoverable > 0:
+        # Reduire le total des gains gagnants. Le residu est borne a 0
+        # (on ne distribue jamais de pertes aux gagnants).
+        new_winner_total = max(0, sum(winner_deltas) - unrecoverable)
+        winner_deltas = _distribute_team_deltas(
+            team_total=new_winner_total,
+            multipliers=winner_mults,
+            is_winner=True,
+        )
+
+    match_id = match_doc.get("_id")
     changes: list[PlayerEloChange] = []
     for p, delta, mult in zip(winners, winner_deltas, winner_mults):
-        changes.append(_apply_player(elo_col, p, delta=delta, win=True, multiplier=mult))
-    for p, delta, mult in zip(losers, loser_deltas, loser_mults):
-        changes.append(_apply_player(elo_col, p, delta=delta, win=False, multiplier=mult))
+        changes.append(_apply_player(elo_col, p, match_id=match_id, delta=delta, win=True, multiplier=mult))
+    for p, delta, mult in zip(losers, clamped_loser_deltas, loser_mults):
+        changes.append(_apply_player(elo_col, p, match_id=match_id, delta=delta, win=False, multiplier=mult))
 
     return MatchEloOutcome(
         avg_elo=avg_elo,
@@ -157,38 +191,65 @@ def _distribute_team_deltas(
 
 
 def _apply_player(
-    col, player: dict, *, delta: int, win: bool, multiplier: float = 1.0,
+    col, player: dict, *, match_id: Any, delta: int, win: bool, multiplier: float = 1.0,
 ) -> PlayerEloChange:
+    """Applique le delta ELO de maniere **idempotente par match**.
+
+    Utilise un set `processed_matches` sur le doc joueur pour eviter la
+    double-application si `apply_match_validation` est rejouee apres un
+    crash partiel (release_elo_claim suivi d'un nouveau claim au prochain
+    tick). Le filtre `processed_matches: {$nin: [match_id]}` rend la mise
+    a jour CAS atomique."""
     uid  = str(player["id"])
     name = player.get("name", uid)
-    doc  = col.find_one({"_id": uid})
-    if not doc:
-        col.insert_one({
-            "_id": uid, "name": name,
-            "elo": elo_calc.ELO_START, "wins": 0, "losses": 0,
-        })
-        doc = {"elo": elo_calc.ELO_START, "wins": 0, "losses": 0}
+    match_id_str = str(match_id) if match_id is not None else None
 
-    old_elo = int(doc.get("elo", 0))
-    if win:
-        new_elo = old_elo + delta            # delta > 0
-        col.update_one(
-            {"_id": uid},
-            {"$set": {"elo": new_elo, "name": name}, "$inc": {"wins": 1}},
-        )
+    # 1) Ensure doc existe (idempotent, ne touche pas elo/wins/losses si deja la).
+    col.update_one(
+        {"_id": uid},
+        {"$setOnInsert": {
+            "name": name,
+            "elo":  elo_calc.ELO_START,
+            "wins": 0,
+            "losses": 0,
+        }},
+        upsert=True,
+    )
+
+    inc_field = "wins" if win else "losses"
+    update: dict[str, Any] = {
+        "$inc": {"elo": delta, inc_field: 1},
+        "$set": {"name": name},
+    }
+    if match_id_str is not None:
+        update["$addToSet"] = {"processed_matches": match_id_str}
+        filter_q = {"_id": uid, "processed_matches": {"$nin": [match_id_str]}}
     else:
-        new_elo = max(0, old_elo + delta)    # delta < 0, plancher a 0
-        col.update_one(
-            {"_id": uid},
-            {"$set": {"elo": new_elo, "name": name}, "$inc": {"losses": 1}},
+        filter_q = {"_id": uid}
+
+    # 2) CAS atomique : applique uniquement si match pas deja processe.
+    pre = col.find_one_and_update(
+        filter_q, update, return_document=ReturnDocument.BEFORE,
+    )
+
+    if pre is None:
+        # Match deja applique pour ce joueur : no-op idempotent.
+        cur_doc = col.find_one({"_id": uid})
+        cur_elo = int(cur_doc.get("elo", 0)) if cur_doc else 0
+        return PlayerEloChange(
+            user_id=uid, name=name,
+            old_elo=cur_elo, new_elo=cur_elo,
+            delta=0, win=win, multiplier=multiplier,
         )
 
+    old_elo = int(pre.get("elo", 0))
+    new_elo = old_elo + delta
     return PlayerEloChange(
         user_id=uid,
         name=name,
         old_elo=old_elo,
         new_elo=new_elo,
-        delta=new_elo - old_elo,
+        delta=delta,
         win=win,
         multiplier=multiplier,
     )

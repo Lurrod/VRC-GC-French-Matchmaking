@@ -26,6 +26,7 @@ coverage.xml
 .idea/
 *.swp
 *.swo
+.claude/
 
 # OS
 .DS_Store

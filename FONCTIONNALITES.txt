@@ -345,7 +345,7 @@ services/                 Logique pure (testable sans Discord)
   elo_mapping.py          Conversion tier numerique <-> nom (Iron 1, Radiant)
   elo_updater.py          MAJ ELO post-vote (gain proportionnel a l'avg)
   match_service.py        Build players, plan match, find free category
-  peak_calculator.py      Regle 6 mois (peak recent / moyenne 6m)
+  riot_id.py              Helpers de parsing Riot ID (Pseudo#TAG)
   repository.py           Acces MongoDB centralise
   riot_api.py             Client HenrikDev (cache 1h, gestion 404/429)
   team_balancer.py        Algo brute-force optimal d'equilibrage
@@ -371,7 +371,7 @@ Outils de test (n'embarquent PAS le vrai bot) :
   test_pagination.py        23 tests  Logique pagination pure
   test_elo_calc.py          27 tests  Calculs ELO purs
   test_team_balancer.py     13 tests  Algo equilibrage
-  test_peak_calculator.py   23 tests  Regle 6 mois
+  test_riot_id.py           23 tests  Parsing Riot ID
   test_riot_api.py          16 tests  Client HenrikDev (mocks HTTP)
   test_riot_link.py         11 tests  Cog /link-riot + check Immortal+
   test_queue_v2.py          26 tests  Repository + QueueView + confirmation ephemere

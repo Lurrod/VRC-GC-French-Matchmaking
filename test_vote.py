@@ -497,6 +497,18 @@ def _seed_match_with_avg_2400(db, guild_id: int = 42, message_id: int = 555):
     )
 
 
+def _seed_db_elos(db, guild_id: int = 42, baseline: int = 2000) -> None:
+    """Seed elo_col pour 10 joueurs : reflete la situation production ou
+    chaque joueur a au moins LINK_BASE_ELO=2000 via /link-riot, evitant
+    le plancher zero-sum qui neutraliserait les gains gagnants."""
+    col = repository.get_elo_col(db, guild_id)
+    for i in range(10):
+        col.insert_one({
+            "_id": str(i), "name": f"P{i}",
+            "elo": baseline, "wins": 0, "losses": 0,
+        })
+
+
 async def _vote_and_verify(cog, guild, match_id, *, choice: str, db, guild_id: int = 42):
     """Helper : 7 votes pour `choice` puis applique ELO via _verify_match
     (henrik_client=None -> fallback ELO plat, comme apres 10 min sans Henrik)."""
@@ -518,6 +530,7 @@ async def test_validation_triggers_elo_update_in_db():
     from cogs.match import MatchCog
 
     match_id = _seed_match_with_avg_2400(bot_module.db)
+    _seed_db_elos(bot_module.db)
 
     channel = MagicMock()
     channel.send = AsyncMock()
@@ -529,11 +542,11 @@ async def test_validation_triggers_elo_update_in_db():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 15, f"Winner {i}: ELO {doc['elo']}"
+        assert doc["elo"] == 2015, f"Winner {i}: ELO {doc['elo']}"  # 2000 + 15
         assert doc["wins"] == 1
     for i in range(5, 10):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 0  # 0 - 15 -> max(0, ...) = 0
+        assert doc["elo"] == 1985  # 2000 - 15
         assert doc["losses"] == 1
 
 
@@ -542,6 +555,7 @@ async def test_validation_sends_recap_embed():
     from cogs.match import MatchCog
 
     match_id = _seed_match_with_avg_2400(bot_module.db)
+    _seed_db_elos(bot_module.db)
 
     channel = MagicMock()
     channel.send = AsyncMock()
@@ -577,6 +591,7 @@ async def test_validation_with_high_elo_match_bigger_gain():
         message_id=555,
         channel_id=100,
     )
+    _seed_db_elos(bot_module.db)
 
     channel = MagicMock()
     channel.send = AsyncMock()
@@ -585,7 +600,7 @@ async def test_validation_with_high_elo_match_bigger_gain():
     await _vote_and_verify(cog, guild, match_id, choice="a", db=bot_module.db)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    assert elo_col.find_one({"_id": "0"})["elo"] == 19    # winner +19 (Radiant avg)
+    assert elo_col.find_one({"_id": "0"})["elo"] == 2019    # 2000 + 19 (Radiant avg)
 
 
 async def test_validated_b_distributes_correctly():
@@ -594,6 +609,7 @@ async def test_validated_b_distributes_correctly():
     from cogs.match import MatchCog
 
     match_id = _seed_match_with_avg_2400(bot_module.db)
+    _seed_db_elos(bot_module.db)
 
     channel = MagicMock()
     channel.send = AsyncMock()
@@ -602,13 +618,13 @@ async def test_validated_b_distributes_correctly():
     await _vote_and_verify(cog, guild, match_id, choice="b", db=bot_module.db)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    # team_b (5..9) gagnent +15
+    # team_b (5..9) gagnent +15 -> 2015
     for i in range(5, 10):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 15
+        assert elo_col.find_one({"_id": str(i)})["elo"] == 2015
         assert elo_col.find_one({"_id": str(i)})["wins"] == 1
-    # team_a (0..4) perdent (mais demarrent a 0 -> reste 0)
+    # team_a (0..4) perdent -15 -> 1985
     for i in range(5):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 0
+        assert elo_col.find_one({"_id": str(i)})["elo"] == 1985
         assert elo_col.find_one({"_id": str(i)})["losses"] == 1
 
 
