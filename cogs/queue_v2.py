@@ -181,7 +181,10 @@ class QueueView(discord.ui.View):
 
         async with self._lock(inter.guild_id):
             # 1) compte Riot lie ?
-            riot = repository.get_riot_account(self.db, inter.guild_id, inter.user.id)
+            riot = await asyncio.to_thread(
+                repository.get_riot_account,
+                self.db, inter.guild_id, inter.user.id,
+            )
             if not riot:
                 await inter.followup.send(
                     "❌ Lie d'abord ton compte Riot avec `/link-riot Pseudo#TAG`.",
@@ -190,7 +193,8 @@ class QueueView(discord.ui.View):
                 return
 
             # 2) ajout en base
-            res = repository.add_player_to_queue(
+            res = await asyncio.to_thread(
+                repository.add_player_to_queue,
                 self.db, inter.guild_id, inter.user.id,
             )
             if not res.success:
@@ -201,8 +205,12 @@ class QueueView(discord.ui.View):
             queue_doc = res.queue
             full = len(queue_doc.get("players", [])) >= QUEUE_SIZE
             if full:
-                repository.close_active_queue(self.db, inter.guild_id)
-                queue_doc = repository.get_active_queue(self.db, inter.guild_id)
+                await asyncio.to_thread(
+                    repository.close_active_queue, self.db, inter.guild_id,
+                )
+                queue_doc = await asyncio.to_thread(
+                    repository.get_active_queue, self.db, inter.guild_id,
+                )
 
             # 4) edit du message
             embed = build_queue_embed(queue_doc, inter.guild)
@@ -236,21 +244,39 @@ class QueueView(discord.ui.View):
         'forming' et bloque toute nouvelle entree."""
         try:
             await self._on_full(inter, queue_doc)
-        except Exception:
+        except Exception as e:
             logger.exception("[queue_v2] _safe_on_full a leve")
             try:
                 repository.delete_active_queue(self.db, inter.guild_id)
-            except Exception as cleanup_err:
-                logger.exception("[queue_v2] cleanup apres on_full a leve")
-            try:
-                channel = inter.channel
-                if channel is not None:
-                    await channel.send(
-                        f"❌ Erreur lors de la formation du match : `{e}`. "
-                        "La queue a ete liberee, retentez avec /setup-queue.",
-                    )
             except Exception:
-                pass
+                logger.exception("[queue_v2] cleanup apres on_full a leve")
+            user_msg = (
+                f"❌ Erreur lors de la formation du match : `{e}`. "
+                "La queue a ete liberee, retentez avec /setup-queue."
+            )
+            channel = inter.channel
+            try:
+                if channel is not None:
+                    await channel.send(user_msg)
+                else:
+                    # Fallback : pas de channel (interaction DM ou
+                    # supprime). On previent quand meme l'utilisateur
+                    # qui a declenche le join + on log explicitement.
+                    logger.warning(
+                        "[queue_v2] inter.channel is None, fallback DM "
+                        "to user %s in guild %s",
+                        inter.user.id, inter.guild_id,
+                    )
+                    if inter.user is not None:
+                        try:
+                            await inter.user.send(user_msg)
+                        except discord.Forbidden:
+                            logger.warning(
+                                "[queue_v2] DM fallback bloque (Forbidden) pour user %s",
+                                inter.user.id,
+                            )
+            except Exception:
+                logger.exception("[queue_v2] notification erreur a leve")
 
     @discord.ui.button(
         label="Quitter", style=discord.ButtonStyle.danger, custom_id=LEAVE_BTN_ID,
@@ -262,7 +288,8 @@ class QueueView(discord.ui.View):
             return
 
         async with self._lock(inter.guild_id):
-            res = repository.remove_player_from_queue(
+            res = await asyncio.to_thread(
+                repository.remove_player_from_queue,
                 self.db, inter.guild_id, inter.user.id,
             )
             if not res.success:

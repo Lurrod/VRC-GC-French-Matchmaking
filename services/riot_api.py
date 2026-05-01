@@ -98,25 +98,34 @@ class MatchSummary:
 
 # ── Cache TTL simple ──────────────────────────────────────────────
 class _TTLCache:
+    """Cache TTL thread-safe : protege _store d'acces concurrents
+    depuis plusieurs `asyncio.to_thread`."""
+
     def __init__(self, ttl: int) -> None:
         self._ttl   = ttl
         self._store: dict[str, tuple[float, Any]] = {}
+        self._lock  = threading.Lock()
 
     def get(self, key: str) -> Any | None:
-        entry = self._store.get(key)
-        if entry is None:
-            return None
-        ts, value = entry
-        if time.time() - ts > self._ttl:
-            del self._store[key]
-            return None
-        return value
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            ts, value = entry
+            if time.time() - ts > self._ttl:
+                # Pop avec defaut : evite KeyError si un autre thread
+                # a deja supprime la cle entre temps.
+                self._store.pop(key, None)
+                return None
+            return value
 
     def set(self, key: str, value: Any) -> None:
-        self._store[key] = (time.time(), value)
+        with self._lock:
+            self._store[key] = (time.time(), value)
 
     def clear(self) -> None:
-        self._store.clear()
+        with self._lock:
+            self._store.clear()
 
 
 # ── Client ────────────────────────────────────────────────────────

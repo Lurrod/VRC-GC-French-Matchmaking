@@ -244,7 +244,10 @@ class VoteView(discord.ui.View):
 
     async def _vote(self, inter: discord.Interaction, choice: str) -> None:
         # 1) Retrouver le match via le message_id
-        match = repository.get_match_by_message(self.db, inter.guild_id, inter.message.id)
+        match = await asyncio.to_thread(
+            repository.get_match_by_message,
+            self.db, inter.guild_id, inter.message.id,
+        )
         if not match:
             await inter.response.send_message("❌ Match introuvable.", ephemeral=True)
             return
@@ -270,7 +273,8 @@ class VoteView(discord.ui.View):
         # 4) Enregistre le vote (ecrase un vote precedent). CAS sur
         # status=pending : si le match a ete annule/conteste/valide
         # entre-temps, le vote est rejete proprement.
-        updated = repository.add_match_vote(
+        updated = await asyncio.to_thread(
+            repository.add_match_vote,
             self.db, inter.guild_id, match["_id"], inter.user.id, choice,
         )
         if updated is None:
@@ -296,16 +300,22 @@ class VoteView(discord.ui.View):
 
         transitioned_doc = None
         if target_status:
-            transitioned_doc = repository.transition_match_status(
-                self.db, inter.guild_id, match["_id"],
-                from_status="pending", to_status=target_status,
+            transitioned_doc = await asyncio.to_thread(
+                lambda: repository.transition_match_status(
+                    self.db, inter.guild_id, match["_id"],
+                    from_status="pending", to_status=target_status,
+                ),
             )
             if transitioned_doc is not None:
                 updated = transitioned_doc
             else:
                 # Un autre vote concurrent a deja valide. On re-fetch pour
                 # afficher l'etat reel sans tirer `on_validated` de notre cote.
-                updated = repository.get_match(self.db, inter.guild_id, match["_id"]) or updated
+                fetched = await asyncio.to_thread(
+                    repository.get_match,
+                    self.db, inter.guild_id, match["_id"],
+                )
+                updated = fetched or updated
 
         # 7) Edit du message (embed maj, view retiree si valide)
         embed = build_match_embed_from_doc(updated, inter.guild.name)
@@ -352,8 +362,12 @@ class MatchCog(commands.Cog):
         self.henrik_client = henrik_client
         self.vote_view     = VoteView(db, on_validated=self._on_match_validated)
         # Circuit breaker Henrik : suspend les appels apres N echecs consecutifs.
+        # `_henrik_lock` serialise les transitions du compteur/ouverture
+        # quand plusieurs verifications tournent en parallele
+        # (asyncio.gather sur les guilds).
         self._henrik_consecutive_failures: int = 0
         self._henrik_circuit_open_until: datetime | None = None
+        self._henrik_lock: asyncio.Lock = asyncio.Lock()
 
     # ── Branchement queue full ───────────────────────────────────
     async def on_queue_full(self, interaction: discord.Interaction, queue_doc: dict):
@@ -408,24 +422,15 @@ class MatchCog(commands.Cog):
 
         plan = plan_match(players, free_category=free_cat_name, rng=self.rng)
 
-        # Ordre de mise en place : on persiste le match (BDD) AVANT les
-        # operations Discord (rôles + VC). Si le bot crash apres un grant
-        # de role mais avant la persistance, on aurait des players avec
-        # un role "Match #N" sans match doc associe (orphelins).
+        # Ordre de mise en place : on persiste le match (BDD) AVANT
+        # d'annoncer sur Discord. Si la persistance echoue (Mongo down,
+        # timeout), on ne veut PAS que les 10 joueurs voient un message
+        # "Match trouve !" sans match doc associe (boutons morts,
+        # /match-cancel ne trouve rien).
         #
-        # Etape 1 : envoyer l'annonce. Le @mention pingera les joueurs en
-        # notification meme si match-preparation est gate par le role
-        # (ils verront le message une fois le role grant a l'etape 4).
-        mentions = " ".join(f"<@{p.id}>" for p in players)
-        embed    = build_match_embed(plan, guild.name)
-        msg = await prep_channel.send(
-            content=f"🎯 Match trouve ! {mentions}",
-            embed=embed,
-            view=self.vote_view,
-        )
-
-        # Etape 2 : persister le match. C'est le point d'engagement :
-        # apres ca, le state machine du match a une source de verite.
+        # Etape 1 : persister le match avec message_id=None. C'est le
+        # point d'engagement : apres ca, le state machine du match a
+        # une source de verite.
         match_id = await asyncio.to_thread(
             repository.create_match,
             self.db,
@@ -435,8 +440,43 @@ class MatchCog(commands.Cog):
             map_name=plan.map_name,
             lobby_leader_id=plan.lobby_leader.id,
             category_name=plan.category_name,
-            message_id=msg.id,
+            message_id=None,
             channel_id=prep_channel.id,
+        )
+
+        # Etape 2 : envoyer l'annonce. Le @mention pingera les joueurs
+        # en notification meme si match-preparation est gate par le
+        # role (ils verront le message une fois le role grant).
+        mentions = " ".join(f"<@{p.id}>" for p in players)
+        embed    = build_match_embed(plan, guild.name)
+        try:
+            msg = await prep_channel.send(
+                content=f"🎯 Match trouve ! {mentions}",
+                embed=embed,
+                view=self.vote_view,
+            )
+        except Exception:
+            # L'annonce a echoue : on annule le match doc fraichement
+            # cree pour eviter un orphelin que personne ne peut voter
+            # (pas de message_id => VoteView introuvable).
+            logger.exception("[match] prep_channel.send a leve, rollback match doc")
+            matches_col = repository.get_matches_col(self.db, guild.id)
+            await asyncio.to_thread(
+                matches_col.delete_one, {"_id": match_id},
+            )
+            await self._fail(
+                interaction, queue_doc,
+                "Echec de l'envoi de l'annonce match. Match annule.",
+            )
+            return None
+
+        # Etape 3 : associer le message_id au match doc. Sans ca,
+        # `get_match_by_message` (utilise par VoteView) ne retrouve pas
+        # le match au moment du vote.
+        matches_col = repository.get_matches_col(self.db, guild.id)
+        await asyncio.to_thread(
+            matches_col.update_one,
+            {"_id": match_id}, {"$set": {"message_id": msg.id}},
         )
 
         # Etape 3 : vider la queue immediatement apres la persistance.
@@ -575,7 +615,19 @@ class MatchCog(commands.Cog):
                 f"Verification HenrikDev a partir de {HENRIK_VERIFY_DELAY_MINUTES} min "
                 f"(retry chaque minute, abandon a {HENRIK_VERIFY_TIMEOUT_MINUTES} min)."
             )
-        except Exception as e:
+        except discord.Forbidden:
+            # Le bot n'a pas la permission Send Messages dans #elo-adding.
+            # C'est un probleme de config recoltable par l'operateur.
+            logger.warning(
+                "[match] envoi annonce Henrik refuse (Forbidden) sur #%s "
+                "guild=%s — verifier les permissions du bot.",
+                elo_log_channel.name, guild.id,
+            )
+        except discord.HTTPException:
+            # Erreur transitoire Discord (5xx, rate limit). On log mais
+            # on n'echoue pas le flux ELO.
+            logger.exception("[match] envoi annonce Henrik HTTP error")
+        except Exception:
             logger.exception("[match] envoi annonce attente Henrik a leve")
 
     async def _process_role_cleanups(self, *, now: datetime | None = None) -> int:
@@ -961,11 +1013,15 @@ class MatchCog(commands.Cog):
         # on saute pendant 5 min. Sans ce garde, chaque tick (1 min)
         # relance N matches stale × 12s de retries chacun, gelant le
         # ThreadPoolExecutor et faisant overlap les ticks.
+        # Lecture serialisee : sans le lock, plusieurs guilds en
+        # parallele pouvaient observer un etat intermediaire (cf #17).
         now = datetime.now(timezone.utc)
-        if (
-            self._henrik_circuit_open_until is not None
-            and now < self._henrik_circuit_open_until
-        ):
+        async with self._henrik_lock:
+            circuit_open = (
+                self._henrik_circuit_open_until is not None
+                and now < self._henrik_circuit_open_until
+            )
+        if circuit_open:
             return None
 
         # `find_henrik_custom_match` fait un appel HTTP synchrone (`requests`).
@@ -982,25 +1038,37 @@ class MatchCog(commands.Cog):
                 after=after,
             )
         except Exception as e:
-            self._henrik_consecutive_failures += 1
-            if self._henrik_consecutive_failures >= HENRIK_CIRCUIT_FAIL_THRESHOLD:
-                self._henrik_circuit_open_until = now + timedelta(
-                    minutes=HENRIK_CIRCUIT_OPEN_MINUTES,
-                )
+            async with self._henrik_lock:
+                self._henrik_consecutive_failures += 1
+                failures = self._henrik_consecutive_failures
+                if failures >= HENRIK_CIRCUIT_FAIL_THRESHOLD:
+                    self._henrik_circuit_open_until = now + timedelta(
+                        minutes=HENRIK_CIRCUIT_OPEN_MINUTES,
+                    )
+                    just_opened = True
+                else:
+                    just_opened = False
+            if just_opened:
                 logger.warning(
                     "[match] Henrik circuit OPEN apres %d echecs consecutifs. "
                     "Reprise dans %d min. Derniere erreur : %r",
-                    self._henrik_consecutive_failures,
-                    HENRIK_CIRCUIT_OPEN_MINUTES,
-                    e,
+                    failures, HENRIK_CIRCUIT_OPEN_MINUTES, e,
                 )
             else:
-                logger.error(f"[match] Henrik echec ({self._henrik_consecutive_failures}/{HENRIK_CIRCUIT_FAIL_THRESHOLD}) : {e!r}", exc_info=True)
+                logger.error(
+                    "[match] Henrik echec (%d/%d) : %r",
+                    failures, HENRIK_CIRCUIT_FAIL_THRESHOLD, e,
+                    exc_info=True,
+                )
             return None
         # Succes : reset le compteur d'echecs et ferme le circuit.
-        if self._henrik_consecutive_failures > 0 or self._henrik_circuit_open_until is not None:
-            self._henrik_consecutive_failures = 0
-            self._henrik_circuit_open_until = None
+        async with self._henrik_lock:
+            if (
+                self._henrik_consecutive_failures > 0
+                or self._henrik_circuit_open_until is not None
+            ):
+                self._henrik_consecutive_failures = 0
+                self._henrik_circuit_open_until = None
         if summary is None:
             return None
 
@@ -1130,10 +1198,10 @@ class MatchCog(commands.Cog):
             return
 
         matches_col = repository.get_matches_col(self.db, interaction.guild_id)
-        match = matches_col.find_one({
-            "channel_id": interaction.channel_id,
-            "status": "pending",
-        })
+        match = await asyncio.to_thread(
+            matches_col.find_one,
+            {"channel_id": interaction.channel_id, "status": "pending"},
+        )
         if not match:
             await interaction.followup.send(
                 "❌ Aucun match en cours (status pending) dans ce salon.",
@@ -1164,7 +1232,8 @@ class MatchCog(commands.Cog):
             )
             return
 
-        riot = repository.get_riot_account(
+        riot = await asyncio.to_thread(
+            repository.get_riot_account,
             self.db, interaction.guild_id, remplacant.id,
         )
         if not riot:
@@ -1176,7 +1245,9 @@ class MatchCog(commands.Cog):
             return
 
         elo_col = repository.get_elo_col(self.db, interaction.guild_id)
-        elo_doc = elo_col.find_one({"_id": str(remplacant.id)})
+        elo_doc = await asyncio.to_thread(
+            elo_col.find_one, {"_id": str(remplacant.id)},
+        )
         new_elo = int(elo_doc.get("elo", 0)) if elo_doc else 0
 
         # Refuse le replace si l'ecart est trop grand : les equipes
@@ -1209,10 +1280,20 @@ class MatchCog(commands.Cog):
             new_player if int(p.get("id", 0)) == quitter.id else p
             for p in match[team_key]
         ]
-        matches_col.update_one(
-            {"_id": match["_id"]},
+        # CAS sur le status : si entre temps un vote a fait passer le
+        # match en validated_*/contested, on ne touche plus aux equipes.
+        result = await asyncio.to_thread(
+            matches_col.update_one,
+            {"_id": match["_id"], "status": "pending"},
             {"$set": {team_key: new_team}},
         )
+        if result.modified_count != 1:
+            await interaction.followup.send(
+                "❌ Le match a ete valide ou annule entre temps. "
+                "Replace abandonne.",
+                ephemeral=True,
+            )
+            return
 
         category_name = match.get("category_name")
         if category_name:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 import asyncio
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
@@ -33,7 +34,11 @@ PAGE_SIZE                = 15
 # en rafale apres N modifs ELO consecutives (ex: /win + /lose + autres
 # admin ops). Discord rate-limit le delete+send (~5/min/channel).
 _REFRESH_DEBOUNCE_SECONDS: int = 30
-_LAST_REFRESH_AT: dict[int, datetime] = {}
+# Borne le cache pour eviter une fuite memoire si le bot tourne sur de
+# nombreuses guilds (entree par guild_id, jamais purgee). LRU avec
+# eviction FIFO du plus ancien acces au-dela de _MAX_GUILDS_TRACKED.
+_MAX_GUILDS_TRACKED: int = 1024
+_LAST_REFRESH_AT: "OrderedDict[int, datetime]" = OrderedDict()
 
 
 async def build_leaderboard_payload(
@@ -164,8 +169,14 @@ async def refresh_leaderboard_channel(
     now = datetime.now(timezone.utc)
     last = _LAST_REFRESH_AT.get(guild.id)
     if last is not None and (now - last).total_seconds() < _REFRESH_DEBOUNCE_SECONDS:
+        # Tape l'entree comme recemment utilisee (move_to_end) pour
+        # qu'elle ne soit pas evincee tant que la guild reste active.
+        _LAST_REFRESH_AT.move_to_end(guild.id)
         return
     _LAST_REFRESH_AT[guild.id] = now
+    _LAST_REFRESH_AT.move_to_end(guild.id)
+    while len(_LAST_REFRESH_AT) > _MAX_GUILDS_TRACKED:
+        _LAST_REFRESH_AT.popitem(last=False)
 
     # On accepte tout salon dont le nom contient "leaderboard" (insensible
     # a la casse) pour supporter les variantes decoratives type

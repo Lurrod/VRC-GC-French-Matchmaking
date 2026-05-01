@@ -6,10 +6,11 @@ import os
 import sys
 
 logger = logging.getLogger(__name__)
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import random
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError
 
 from services import elo_calc, repository
 from services.riot_api import HenrikDevClient
@@ -53,6 +54,46 @@ def get_elo_col(guild_id: int | str) -> Collection:
 
 def get_bypass_col() -> Collection:
     return repository.get_bypass_col(db)
+
+CANDIDATURE_COOLDOWN_SECONDS = 3600
+
+def _try_acquire_candidature_cooldown(uid: str) -> tuple[bool, float]:
+    """Tente d'acquerir atomiquement un slot de cooldown candidature.
+
+    Retourne (allowed, remaining_seconds). `allowed=True` -> l'utilisateur
+    peut postuler ; `allowed=False` -> doit attendre `remaining_seconds`.
+
+    Resout la race read-then-write : deux soumissions concurrentes ne
+    peuvent pas toutes deux passer le check (CAS via update conditionnel
+    + insert avec gestion DuplicateKeyError)."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=CANDIDATURE_COOLDOWN_SECONDS)
+    cooldown_col = db["candidature_cooldowns"]
+    # 1) update conditionnel : passe seulement si cooldown expire
+    res = cooldown_col.update_one(
+        {"_id": uid, "last_apply": {"$lt": cutoff}},
+        {"$set": {"last_apply": now}},
+    )
+    if res.modified_count == 1:
+        return True, 0.0
+    # 2) doc absent : tenter insert (atomique grace a la cle unique _id)
+    try:
+        cooldown_col.insert_one({"_id": uid, "last_apply": now})
+        return True, 0.0
+    except DuplicateKeyError:
+        pass
+    # 3) cooldown encore actif : lire la valeur courante pour le message
+    doc = cooldown_col.find_one({"_id": uid})
+    if doc is None:
+        # Race tres improbable : doc supprime entre temps, on autorise
+        return True, 0.0
+    last = doc["last_apply"]
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    remaining = CANDIDATURE_COOLDOWN_SECONDS - (now - last).total_seconds()
+    if remaining <= 0:
+        return True, 0.0
+    return False, remaining
 
 def get_player(col, member: discord.Member):
     return repository.get_or_create_player(
@@ -236,10 +277,14 @@ async def win(
         timestamp=datetime.now(timezone.utc),
     )
     for member in players:
-        doc = get_player(col, member)
-        old = doc["elo"]
+        get_player(col, member)
+        old_doc = col.find_one_and_update(
+            {"_id": str(member.id)},
+            {"$inc": {"elo": gain, "wins": 1}},
+            return_document=ReturnDocument.BEFORE,
+        )
+        old = (old_doc or {}).get("elo", 0)
         new = old + gain
-        col.update_one({"_id": str(member.id)}, {"$set": {"elo": new}, "$inc": {"wins": 1}})
         embed.add_field(
             name=member.display_name,
             value=f"+{gain} ELO -> **{new}** *(était {old})*",
@@ -280,10 +325,17 @@ async def lose(
         timestamp=datetime.now(timezone.utc),
     )
     for member in players:
-        doc = get_player(col, member)
-        old = doc["elo"]
+        get_player(col, member)
+        old_doc = col.find_one_and_update(
+            {"_id": str(member.id)},
+            [{"$set": {
+                "elo": {"$max": [0, {"$subtract": [{"$ifNull": ["$elo", 0]}, loss]}]},
+                "losses": {"$add": [{"$ifNull": ["$losses", 0]}, 1]},
+            }}],
+            return_document=ReturnDocument.BEFORE,
+        )
+        old = (old_doc or {}).get("elo", 0)
         new = max(0, old - loss)
-        col.update_one({"_id": str(member.id)}, {"$set": {"elo": new}, "$inc": {"losses": 1}})
         embed.add_field(
             name=member.display_name,
             value=f"-{loss} ELO -> **{new}** (etait {old})",
@@ -392,19 +444,25 @@ async def elomodify(interaction: discord.Interaction, joueur: discord.Member, ac
         )
         return
     col = get_elo_col(interaction.guild_id)
-    doc = get_player(col, joueur)
-    old = doc["elo"]
+    get_player(col, joueur)
+    delta = montant if action == "add" else -montant
+    # Pipeline update + return BEFORE : un seul aller-retour, atomique,
+    # et on recupere l'ancien ELO pour l'affichage.
+    old_doc = col.find_one_and_update(
+        {"_id": str(joueur.id)},
+        [{"$set": {"elo": {"$max": [0, {"$add": [{"$ifNull": ["$elo", 0]}, delta]}]}}}],
+        return_document=ReturnDocument.BEFORE,
+    )
+    old = (old_doc or {}).get("elo", 0)
+    new = max(0, old + delta)
     if action == "add":
-        new   = old + montant
         color = 0x2ecc71
         label = f"+{montant}"
         title = "➕ ELO ajouté"
     else:
-        new   = max(0, old - montant)
         color = 0xe74c3c
         label = f"-{montant}"
         title = "➖ ELO retiré"
-    col.update_one({"_id": str(joueur.id)}, {"$set": {"elo": new}})
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur",       value=joueur.mention,                    inline=True)
     embed.add_field(name="Modification", value=label,                             inline=True)
@@ -431,19 +489,23 @@ async def winmodify(interaction: discord.Interaction, joueur: discord.Member, ac
         )
         return
     col = get_elo_col(interaction.guild_id)
-    doc = get_player(col, joueur)
-    old = doc.get("wins", 0)
+    get_player(col, joueur)
+    delta = montant if action == "add" else -montant
+    old_doc = col.find_one_and_update(
+        {"_id": str(joueur.id)},
+        [{"$set": {"wins": {"$max": [0, {"$add": [{"$ifNull": ["$wins", 0]}, delta]}]}}}],
+        return_document=ReturnDocument.BEFORE,
+    )
+    old = (old_doc or {}).get("wins", 0)
+    new = max(0, old + delta)
     if action == "add":
-        new   = old + montant
         color = 0x2ecc71
         label = f"+{montant}"
         title = "➕ Victoires ajoutées"
     else:
-        new   = max(0, old - montant)
         color = 0xe74c3c
         label = f"-{montant}"
         title = "➖ Victoires retirées"
-    col.update_one({"_id": str(joueur.id)}, {"$set": {"wins": new}})
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur",        value=joueur.mention,             inline=True)
     embed.add_field(name="Modification",  value=label,                      inline=True)
@@ -471,19 +533,23 @@ async def losemodify(interaction: discord.Interaction, joueur: discord.Member, a
         )
         return
     col = get_elo_col(interaction.guild_id)
-    doc = get_player(col, joueur)
-    old = doc.get("losses", 0)
+    get_player(col, joueur)
+    delta = montant if action == "add" else -montant
+    old_doc = col.find_one_and_update(
+        {"_id": str(joueur.id)},
+        [{"$set": {"losses": {"$max": [0, {"$add": [{"$ifNull": ["$losses", 0]}, delta]}]}}}],
+        return_document=ReturnDocument.BEFORE,
+    )
+    old = (old_doc or {}).get("losses", 0)
+    new = max(0, old + delta)
     if action == "add":
-        new   = old + montant
         color = 0xe74c3c
         label = f"+{montant}"
         title = "➕ Défaites ajoutées"
     else:
-        new   = max(0, old - montant)
         color = 0x2ecc71
         label = f"-{montant}"
         title = "➖ Défaites retirées"
-    col.update_one({"_id": str(joueur.id)}, {"$set": {"losses": new}})
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur", value=joueur.mention, inline=True)
     embed.add_field(name="Modification", value=label, inline=True)
@@ -658,10 +724,14 @@ async def win_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = Non
         timestamp=datetime.now(timezone.utc),
     )
     for member in players:
-        doc = get_player(col, member)
-        old = doc["elo"]
+        get_player(col, member)
+        old_doc = col.find_one_and_update(
+            {"_id": str(member.id)},
+            {"$inc": {"elo": gain, "wins": 1}},
+            return_document=ReturnDocument.BEFORE,
+        )
+        old = (old_doc or {}).get("elo", 0)
         new = old + gain
-        col.update_one({"_id": str(member.id)}, {"$set": {"elo": new}, "$inc": {"wins": 1}})
         embed.add_field(name=member.display_name, value=f"+{gain} ELO -> **{new}**", inline=False)
     embed.set_footer(text=f"Enregistre par {ctx.author.display_name}")
     await ctx.send(embed=embed)
@@ -686,10 +756,17 @@ async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = No
         timestamp=datetime.now(timezone.utc),
     )
     for member in players:
-        doc = get_player(col, member)
-        old = doc["elo"]
+        get_player(col, member)
+        old_doc = col.find_one_and_update(
+            {"_id": str(member.id)},
+            [{"$set": {
+                "elo": {"$max": [0, {"$subtract": [{"$ifNull": ["$elo", 0]}, loss]}]},
+                "losses": {"$add": [{"$ifNull": ["$losses", 0]}, 1]},
+            }}],
+            return_document=ReturnDocument.BEFORE,
+        )
+        old = (old_doc or {}).get("elo", 0)
         new = max(0, old - loss)
-        col.update_one({"_id": str(member.id)}, {"$set": {"elo": new}, "$inc": {"losses": 1}})
         embed.add_field(name=member.display_name, value=f"-{loss} ELO -> **{new}**", inline=False)
     embed.set_footer(text=f"Enregistre par {ctx.author.display_name}")
     await ctx.send(embed=embed)
@@ -740,21 +817,13 @@ class ApplicationModal(discord.ui.Modal, title="Candidature 10mans"):
         # et l'envoi sur le salon candidatures peuvent depasser les 3s du
         # token d'interaction. Le defer libere ce delai.
         await interaction.response.defer(ephemeral=True, thinking=True)
-        cooldown_col = db["candidature_cooldowns"]
         uid = str(interaction.user.id)
-        doc = cooldown_col.find_one({"_id": uid})
-        if doc:
-            last = doc["last_apply"]
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
-            diff = datetime.now(timezone.utc) - last
-            if diff.total_seconds() < 3600:
-                remaining = 3600 - diff.total_seconds()
-                minutes = int(remaining // 60)
-                seconds = int(remaining % 60)
-                await interaction.followup.send(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
-                return
-        cooldown_col.update_one({"_id": uid}, {"$set": {"last_apply": datetime.now(timezone.utc)}}, upsert=True)
+        allowed, remaining = _try_acquire_candidature_cooldown(uid)
+        if not allowed:
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            await interaction.followup.send(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
+            return
         try:
             await interaction.user.send(embed=discord.Embed(title="✅ Candidature reçue !", description="Merci d'avoir postulé, nous analysons votre profil et nous revenons vers vous le plus vite possible.", color=0x2ecc71, timestamp=datetime.now(timezone.utc)))
         except discord.Forbidden:
@@ -962,21 +1031,13 @@ class StaffModal(discord.ui.Modal, title="Candidature Staff"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        cooldown_col = db["candidature_cooldowns"]
         uid = str(interaction.user.id)
-        doc = cooldown_col.find_one({"_id": uid})
-        if doc:
-            last = doc["last_apply"]
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
-            diff = datetime.now(timezone.utc) - last
-            if diff.total_seconds() < 3600:
-                remaining = 3600 - diff.total_seconds()
-                minutes = int(remaining // 60)
-                seconds = int(remaining % 60)
-                await interaction.followup.send(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
-                return
-        cooldown_col.update_one({"_id": uid}, {"$set": {"last_apply": datetime.now(timezone.utc)}}, upsert=True)
+        allowed, remaining = _try_acquire_candidature_cooldown(uid)
+        if not allowed:
+            minutes = int(remaining // 60)
+            seconds = int(remaining % 60)
+            await interaction.followup.send(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
+            return
         try:
             await interaction.user.send(embed=discord.Embed(title="✅ Candidature reçue !", description="Merci d'avoir postulé, nous analysons votre profil et nous revenons vers vous le plus vite possible.", color=0x2ecc71, timestamp=datetime.now(timezone.utc)))
         except discord.Forbidden:
@@ -1019,16 +1080,19 @@ class WelcomeView(discord.ui.View):
 
     @discord.ui.button(label="Postuler", style=discord.ButtonStyle.primary, custom_id="postuler_btn")
     async def postuler(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cooldown_col = db["candidature_cooldowns"]
+        # Peek non-atomique volontaire : on ne consomme pas le cooldown ici
+        # (sinon l'utilisateur qui ferme le modal sans submit serait
+        # bloque 1h pour rien). Le vrai claim atomique a lieu dans
+        # ApplicationModal/StaffModal.on_submit.
         uid = str(interaction.user.id)
-        doc = cooldown_col.find_one({"_id": uid})
+        doc = db["candidature_cooldowns"].find_one({"_id": uid})
         if doc:
             last = doc["last_apply"]
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             diff = datetime.now(timezone.utc) - last
-            if diff.total_seconds() < 3600:
-                remaining = 3600 - diff.total_seconds()
+            if diff.total_seconds() < CANDIDATURE_COOLDOWN_SECONDS:
+                remaining = CANDIDATURE_COOLDOWN_SECONDS - diff.total_seconds()
                 minutes = int(remaining // 60)
                 seconds = int(remaining % 60)
                 await interaction.response.send_message(f"⏳ Tu as déjà postulé récemment ! Réessaie dans **{minutes}min {seconds}s**.", ephemeral=True)
