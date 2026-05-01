@@ -37,13 +37,15 @@ _LAST_REFRESH_AT: dict[int, datetime] = {}
 
 
 async def build_leaderboard_payload(
-    guild: discord.Guild, db, *, with_view: bool = True,
+    guild: discord.Guild, db, *,
+    with_view: bool = True,
+    view_timeout: float | None = 300,
 ) -> Tuple[Optional[discord.File], Optional[discord.ui.View]]:
     """Retourne (file, view) prets a etre envoyes. (None, None) si vide.
 
-    Si `with_view=False`, la vue de pagination est omise (utile pour les
-    auto-refresh dans `#leaderboard` ou les boutons mourraient apres
-    timeout=300 sans interaction utilisateur)."""
+    `with_view=False` -> pas de pagination (post statique).
+    `view_timeout` -> duree de vie des boutons (None = jamais expire,
+    pratique pour les posts permanents dans `#leaderboard`)."""
     col  = repository.get_elo_col(db, guild.id)
     # Tri deterministique : ELO desc, puis wins desc (recompense l'activite
     # parmi les ex-aequo), puis _id asc comme tie-breaker final.
@@ -95,7 +97,7 @@ async def build_leaderboard_payload(
 
     class LeaderboardView(discord.ui.View):
         def __init__(self, page: int):
-            super().__init__(timeout=300)
+            super().__init__(timeout=view_timeout)
             self.page = page
             self.update_buttons()
 
@@ -214,7 +216,9 @@ async def refresh_leaderboard_channel(
             logger.exception("leaderboard_refresh exception")
 
     try:
-        file, _view = await build_leaderboard_payload(guild, db, with_view=False)
+        file, view = await build_leaderboard_payload(
+            guild, db, view_timeout=None,
+        )
     except Exception:
         logger.exception("leaderboard_refresh exception")
         return
@@ -222,7 +226,7 @@ async def refresh_leaderboard_channel(
         return
 
     try:
-        new_msg = await chan.send(file=file)
+        new_msg = await chan.send(file=file, view=view)
     except Exception:
         logger.exception("leaderboard_refresh exception")
         return

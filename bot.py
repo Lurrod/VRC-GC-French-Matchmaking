@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import logging
 import os
+import sys
 
 logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
@@ -1126,10 +1127,24 @@ if __name__ == "__main__":
     # Configuration logging : niveau INFO + format avec timestamp et logger
     # name. Permet de filtrer en prod (ex: -e LOG_LEVEL=DEBUG via supervisor).
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
-        format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    # Split stdout / stderr : DEBUG+INFO -> stdout, WARNING+ -> stderr.
+    # PM2 capture stdout -> out.log et stderr -> error.log, donc tant que
+    # rien n'est anormal seul out.log se remplit.
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
     )
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.DEBUG)
+    stdout_handler.addFilter(lambda r: r.levelno < logging.WARNING)
+    stdout_handler.setFormatter(fmt)
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setFormatter(fmt)
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, log_level, logging.INFO))
+    root.handlers.clear()
+    root.addHandler(stdout_handler)
+    root.addHandler(stderr_handler)
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN environment variable not set")
     bot.run(TOKEN)
