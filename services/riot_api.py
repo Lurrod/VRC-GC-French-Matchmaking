@@ -265,14 +265,21 @@ class HenrikDevClient:
         size: int = 5,
         mode: str | None = None,
     ) -> list[MatchSummary]:
-        """Recupere les matchs recents d'un joueur. `mode` filtre cote API ('custom', etc.)."""
+        """Recupere les matchs recents d'un joueur. `mode` filtre cote API ('custom', etc.).
+
+        IMPORTANT : le paramètre query est `mode=`, pas `filter=`. HenrikDev accepte
+        encore `filter=` dans l'URL pour rétrocompatibilité, mais l'IGNORE silencieusement
+        (renvoie l'historique non-filtré). Verifié contre l'API en mai 2026 :
+        `?filter=custom` -> 10 matches Competitive ; `?mode=custom` -> 10 Custom Game.
+        Sans ce param correct, `find_henrik_custom_match` ne trouve jamais le custom
+        si le leader a joue >= 10 autres modes depuis."""
         if region not in VALID_REGIONS:
             raise ValueError(f"Region invalide : {region}")
         safe_name = quote(name, safe="")
         safe_tag = quote(tag, safe="")
         path = f"/v3/matches/{region}/{safe_name}/{safe_tag}?size={int(size)}"
         if mode:
-            path += f"&filter={quote(str(mode), safe='')}"
+            path += f"&mode={quote(str(mode), safe='')}"
         # Pas de cache : cet endpoint est appele en boucle pour detecter
         # l'apparition d'un custom recent. Avec le TTL de 1h, le 1er retry
         # renverrait pour toujours le stale "pas encore indexe".

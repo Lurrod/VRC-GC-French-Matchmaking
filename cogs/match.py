@@ -36,7 +36,11 @@ logger = logging.getLogger(__name__)
 
 from cogs.queue_v2 import _grant_match_role, _revoke_match_role, _revoke_queue_role
 
-MATCH_ROLE_CLEANUP_DELAY_SECONDS: Final[int] = 60
+MATCH_ROLE_CLEANUP_DELAY_SECONDS: Final[int] = 0  # immediat (etait 60s) — le role
+# Match #N est retire des le vote valide, pour que les joueurs puissent
+# rejoindre une nouvelle queue sans attendre. Le delai persiste comme
+# filet de securite : si le revoke immediat crash, le tick (1 min) le
+# reprendra via _process_role_cleanups (claim CAS idempotent).
 # Ecart d'ELO max entre le joueur sortant et le remplacant. Au-dela, on
 # refuse le /match-replace : les equipes du match en cours seraient trop
 # desequilibrees pour que le resultat reflete une vraie perf des joueurs.
@@ -596,6 +600,15 @@ class MatchCog(commands.Cog):
             except Exception as e:
                 logger.exception("[match] schedule role cleanups a leve")
 
+            # Revoke immediat du role Match #N : les joueurs peuvent
+            # rejoindre une nouvelle queue sans attendre le tick suivant.
+            # Le claim CAS empeche un double-traitement par
+            # _process_role_cleanups (qui verra match_role_cleanup_done=True).
+            try:
+                await self._revoke_match_role_immediately(guild, match_doc)
+            except Exception:
+                logger.exception("[match] immediate match role revoke a leve")
+
         # 3) Annonce best-effort. Toute erreur ici ne doit pas empecher
         #    le cleanup de tourner.
         if guild is None:
@@ -629,6 +642,30 @@ class MatchCog(commands.Cog):
             logger.exception("[match] envoi annonce Henrik HTTP error")
         except Exception:
             logger.exception("[match] envoi annonce attente Henrik a leve")
+
+    async def _revoke_match_role_immediately(self, guild, match_doc: dict) -> None:
+        """Retire le role `Match #N` aux 10 joueurs des qu'un vote valide
+        atteint la majorite. Utilise le meme claim CAS que
+        `_process_role_cleanups_for_guild` pour l'idempotence : si un autre
+        chemin (tick post-redemarrage) traite le meme cleanup, un seul
+        appel passe."""
+        claimed = await asyncio.to_thread(
+            repository.claim_match_role_cleanup,
+            self.db, guild.id, match_doc["_id"],
+        )
+        if not claimed:
+            return  # deja fait ailleurs (tick recovery apres crash)
+        category_name = match_doc.get("category_name")
+        if not category_name:
+            return
+        for team_key in ("team_a", "team_b"):
+            for player in match_doc.get(team_key, []):
+                uid = player.get("id")
+                if uid is None:
+                    continue
+                member = guild.get_member(int(uid))
+                if member is not None:
+                    await _revoke_match_role(member, category_name)
 
     async def _process_role_cleanups(self, *, now: datetime | None = None) -> int:
         """Traite les cleanups de roles dont l'echeance persistee est passee.
@@ -1077,7 +1114,22 @@ class MatchCog(commands.Cog):
             team_a_uid_by_puuid=team_a_uid_by_puuid,
             team_b_uid_by_puuid=team_b_uid_by_puuid,
         )
-        return {p.user_id: p.multiplier for p in verified.performances}
+        multipliers = {p.user_id: p.multiplier for p in verified.performances}
+        # Si compute_acs_multipliers n'a rien pu extraire (les 2 teams cote
+        # Riot sont mixtes : joueurs ont switche Attack/Defense en lobby),
+        # on retourne None plutot qu'un dict vide. Sinon
+        # apply_match_validation aurait `weighted=True` mais appliquerait
+        # tout de meme un ELO plat (mults.get -> 1.0 par defaut), affichant
+        # "Ponderation ACS appliquee" alors que rien ne l'est.
+        if not multipliers:
+            logger.warning(
+                "[match] Henrik a trouve le custom %s mais compute_acs_multipliers "
+                "n'a pu extraire aucun multiplicateur (teams mixtes Attack/Defense "
+                "en lobby Valorant ?). ELO plat applique.",
+                summary.matchid,
+            )
+            return None
+        return multipliers
 
     # ── Loop periodique (1 min) ──────────────────────────────────
     @tasks.loop(minutes=1)
@@ -1280,12 +1332,24 @@ class MatchCog(commands.Cog):
             new_player if int(p.get("id", 0)) == quitter.id else p
             for p in match[team_key]
         ]
+        # Si le quitter etait le lobby leader, transferer le role au
+        # remplacant : sans ca, `_fetch_henrik_multipliers` interroge
+        # l'historique Riot du lobby leader original (qui n'a pas joue
+        # le custom) -> match jamais retrouve cote Henrik -> ELO plat
+        # applique au lieu de la ponderation ACS attendue. Le role
+        # Discord "Match Host" suit aussi.
+        update: dict[str, Any] = {team_key: new_team}
+        leader_replaced = (
+            int(match.get("lobby_leader_id", 0)) == int(quitter.id)
+        )
+        if leader_replaced:
+            update["lobby_leader_id"] = str(remplacant.id)
         # CAS sur le status : si entre temps un vote a fait passer le
         # match en validated_*/contested, on ne touche plus aux equipes.
         result = await asyncio.to_thread(
             matches_col.update_one,
             {"_id": match["_id"], "status": "pending"},
-            {"$set": {team_key: new_team}},
+            {"$set": update},
         )
         if result.modified_count != 1:
             await interaction.followup.send(
@@ -1300,9 +1364,15 @@ class MatchCog(commands.Cog):
             await _revoke_match_role(quitter, category_name)
             await _grant_match_role(remplacant, category_name)
 
+        # Transfert du role "Match Host" si c'est le leader qu'on remplace.
+        if leader_replaced:
+            await _revoke_match_role(quitter, MATCH_HOST_ROLE_NAME)
+            await _grant_match_role(remplacant, MATCH_HOST_ROLE_NAME)
+
+        suffix = " (lobby host)" if leader_replaced else ""
         await interaction.followup.send(
             f"✅ {quitter.mention} remplace par {remplacant.mention} dans "
-            f"`{team_key}`. Roles ajustes.",
+            f"`{team_key}`{suffix}. Roles ajustes.",
             ephemeral=True,
         )
 

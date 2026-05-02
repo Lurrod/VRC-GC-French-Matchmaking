@@ -67,8 +67,9 @@ def test_validated_a_winners_get_gain():
     match = _make_match(status="validated_a", elo=2400)
     outcome = apply_match_validation(bot_module.db, 42, match)
 
-    assert outcome.gain == 15      # zero-sum a avg=2400
-    assert outcome.loss == 15
+    # Sans multipliers (Henrik introuvable) -> fallback flat 20.
+    assert outcome.gain == 20
+    assert outcome.loss == 20
     assert outcome.avg_elo == 2400
 
     # Toutes les changes : team_a (0..4) gagne, team_b (5..9) perd
@@ -96,13 +97,13 @@ def test_winners_get_plus_gain_in_db():
     # constate que les perdants (a 0 ELO) ne peuvent rien perdre, et
     # neutralise les gains gagnants pour rester zero-sum.
     _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
-    match = _make_match(elo=2400)  # avg=2400 -> change=15
+    match = _make_match(elo=2400)  # avg=2400, sans multipliers -> flat 20
     apply_match_validation(bot_module.db, 42, match)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 2015  # 2000 + 15
+        assert doc["elo"] == 2020  # 2000 + 20 (flat fallback)
         assert doc["wins"] == 1
         assert doc["losses"] == 0
 
@@ -126,11 +127,11 @@ def test_loser_existing_elo_decreases_correctly():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     elo_col.insert_one({"_id": "5", "name": "B0", "elo": 50, "wins": 0, "losses": 0})
 
-    match = _make_match(elo=2400)  # loss=15
+    match = _make_match(elo=2400)  # sans multipliers -> flat loss=20
     apply_match_validation(bot_module.db, 42, match)
 
     doc = elo_col.find_one({"_id": "5"})
-    assert doc["elo"] == 35
+    assert doc["elo"] == 30
     assert doc["losses"] == 1
 
 
@@ -146,12 +147,15 @@ def test_loser_floored_at_zero():
     assert doc["elo"] == 0
 
 
-def test_high_elo_match_bigger_swings():
+def test_high_elo_match_bigger_swings_with_multipliers():
     import bot as bot_module
-    # Radiant (avg=3000) zero-sum -> change=19
+    # Avec multipliers ACS (Henrik OK), la formule proportionnelle s'applique.
+    # Radiant (avg=3000) zero-sum -> change=19. Sans multipliers, ce test
+    # mesurerait le flat 20 et perdrait son sens.
     _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
     match = _make_match(elo=3000)
-    outcome = apply_match_validation(bot_module.db, 42, match)
+    multipliers = {str(i): 1.0 for i in range(10)}
+    outcome = apply_match_validation(bot_module.db, 42, match, multipliers=multipliers)
     assert outcome.gain == 19
     assert outcome.loss == 19
 
@@ -159,13 +163,25 @@ def test_high_elo_match_bigger_swings():
     assert elo_col.find_one({"_id": "0"})["elo"] == 2019  # 2000 + 19
 
 
-def test_low_elo_match_smaller_swings():
+def test_low_elo_match_smaller_swings_with_multipliers():
     import bot as bot_module
-    # avg sous le floor (300) zero-sum -> change=2
+    # Avec multipliers : avg sous le floor (300) zero-sum -> change=2.
     match = _make_match(elo=300)
-    outcome = apply_match_validation(bot_module.db, 42, match)
+    multipliers = {str(i): 1.0 for i in range(10)}
+    outcome = apply_match_validation(bot_module.db, 42, match, multipliers=multipliers)
     assert outcome.gain == 2
     assert outcome.loss == 2
+
+
+def test_no_multipliers_uses_flat_fallback_regardless_of_avg():
+    """Sans multipliers, le base change est toujours 20 (flat), peu importe
+    l'avg ELO du match. Verifie le nouveau comportement du fallback."""
+    import bot as bot_module
+    for avg in (300, 2400, 3000):
+        match = _make_match(elo=avg)
+        outcome = apply_match_validation(bot_module.db, 42, match)
+        assert outcome.gain == 20, f"avg={avg}, gain={outcome.gain}"
+        assert outcome.loss == 20, f"avg={avg}, loss={outcome.loss}"
 
 
 def test_existing_winner_keeps_history_and_adds_gain():
@@ -183,7 +199,7 @@ def test_existing_winner_keeps_history_and_adds_gain():
     apply_match_validation(bot_module.db, 42, match)
 
     doc = elo_col.find_one({"_id": "0"})
-    assert doc["elo"] == 215       # 200 + 15
+    assert doc["elo"] == 220       # 200 + 20 (flat fallback sans multipliers)
     assert doc["wins"] == 6        # 5 + 1
     assert doc["losses"] == 3      # inchange
 
@@ -197,9 +213,10 @@ def test_mixed_team_avg_elo():
         "status": "validated_a",
     }
     outcome = apply_match_validation(bot_module.db, 42, match)
-    # Avg total = (5*2200 + 5*2600) / 10 = 2400 -> change 15
+    # Avg total = (5*2200 + 5*2600) / 10 = 2400. Sans multipliers ->
+    # flat fallback 20, mais avg_elo reste informatif dans l'embed.
     assert outcome.avg_elo == 2400
-    assert outcome.gain == 15
+    assert outcome.gain == 20
 
 
 def test_change_dataclass_fields():
@@ -209,14 +226,14 @@ def test_change_dataclass_fields():
     outcome = apply_match_validation(bot_module.db, 42, match)
 
     winner = next(c for c in outcome.changes if c.win)
-    assert winner.delta == 15
+    assert winner.delta == 20  # flat fallback sans multipliers
     assert winner.old_elo == 2000
-    assert winner.new_elo == 2015
+    assert winner.new_elo == 2020
 
     loser = next(c for c in outcome.changes if not c.win)
-    assert loser.delta == -15
+    assert loser.delta == -20
     assert loser.old_elo == 2000
-    assert loser.new_elo == 1985
+    assert loser.new_elo == 1980
 
 
 # ── Zero-sum garanti avec multiplicateurs (fix audit #1) ──────────

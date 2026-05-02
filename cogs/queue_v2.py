@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 from datetime import datetime, timezone
 
@@ -22,6 +23,22 @@ from discord import app_commands
 from discord.ext import commands
 
 from services import repository
+
+
+# Roles "Match #1", "Match #2", "Match #3" attribues a un joueur en cours
+# de match. Tant qu'un joueur a un de ces roles, il est dans un match
+# pending (vote non termine) — on lui refuse l'entree dans une nouvelle
+# queue. Le role est retire des le vote valide, donc le joueur peut
+# rejoindre la queue sans delai. "Match Host" n'est PAS gate.
+_MATCH_ROLE_PATTERN = re.compile(r"^Match #\d+$")
+
+
+def _has_match_role(member: discord.Member) -> str | None:
+    """Renvoie le nom du role 'Match #N' du membre, ou None s'il n'en a pas."""
+    for role in member.roles:
+        if _MATCH_ROLE_PATTERN.match(role.name):
+            return role.name
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +208,20 @@ class QueueView(discord.ui.View):
                     ephemeral=True,
                 )
                 return
+
+            # 1b) deja dans un match en cours ?
+            # Le role `Match #N` reste tant que le vote n'est pas valide ;
+            # on bloque le requeue pour eviter qu'un joueur soit dans 2
+            # matches simultanes (lobbies eclates, equipes desequilibrees).
+            if isinstance(inter.user, discord.Member):
+                ongoing_role = _has_match_role(inter.user)
+                if ongoing_role is not None:
+                    await inter.followup.send(
+                        f"❌ Tu es deja dans un match en cours (role `{ongoing_role}`). "
+                        "Attends la fin du vote pour rejoindre une nouvelle queue.",
+                        ephemeral=True,
+                    )
+                    return
 
             # 2) ajout en base
             res = await asyncio.to_thread(

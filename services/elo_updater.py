@@ -19,6 +19,14 @@ from services import elo_calc, repository
 VALIDATED_A: Final[str] = "validated_a"
 VALIDATED_B: Final[str] = "validated_b"
 
+# Fallback fixe quand HenrikDev ne fournit pas de multiplicateurs ACS
+# (custom introuvable apres timeout 30 min, ou extraction impossible :
+# teams mixtes Attack/Defense en lobby Valorant). On applique +20/-20
+# a plat plutot que la valeur proportionnelle a l'avg ELO du match.
+# C'est plus lisible pour les joueurs et evite les variations bizarres
+# (15/17/19) selon le tier moyen.
+FLAT_FALLBACK_ELO_CHANGE: Final[int] = 20
+
 
 @dataclass(frozen=True)
 class PlayerEloChange:
@@ -83,8 +91,16 @@ def apply_match_validation(
     else:
         winners, losers = match_doc["team_b"], match_doc["team_a"]
 
-    avg_elo              = elo_calc.compute_team_avg_elo(winners + losers)
-    base_gain, base_loss = elo_calc.compute_match_elo_change(avg_elo)
+    avg_elo = elo_calc.compute_team_avg_elo(winners + losers)
+    if multipliers is None:
+        # Pas de donnees Henrik : on applique +20/-20 a plat. La valeur
+        # proportionnelle (`compute_match_elo_change`) ne sert plus
+        # qu'au cas pondere ACS, ou l'avg du match a un sens (les
+        # multiplicateurs distribuent le total).
+        base_gain = FLAT_FALLBACK_ELO_CHANGE
+        base_loss = FLAT_FALLBACK_ELO_CHANGE
+    else:
+        base_gain, base_loss = elo_calc.compute_match_elo_change(avg_elo)
 
     mults    = multipliers or {}
     weighted = multipliers is not None

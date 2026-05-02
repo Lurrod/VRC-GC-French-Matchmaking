@@ -542,11 +542,12 @@ async def test_validation_triggers_elo_update_in_db():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 2015, f"Winner {i}: ELO {doc['elo']}"  # 2000 + 15
+        # _verify_match force_apply=True sans Henrik -> flat fallback +20
+        assert doc["elo"] == 2020, f"Winner {i}: ELO {doc['elo']}"
         assert doc["wins"] == 1
     for i in range(5, 10):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 1985  # 2000 - 15
+        assert doc["elo"] == 1980  # 2000 - 20
         assert doc["losses"] == 1
 
 
@@ -573,7 +574,7 @@ async def test_validation_sends_recap_embed():
     fields = {f.name: f.value for f in recap.fields}
     assert any("Gagnants" in n for n in fields)
     assert any("Perdants" in n for n in fields)
-    assert "+15" in fields["🟢 Gagnants"]
+    assert "+20" in fields["🟢 Gagnants"]  # flat fallback sans Henrik
 
 
 async def test_validation_with_high_elo_match_bigger_gain():
@@ -600,7 +601,8 @@ async def test_validation_with_high_elo_match_bigger_gain():
     await _vote_and_verify(cog, guild, match_id, choice="a", db=bot_module.db)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    assert elo_col.find_one({"_id": "0"})["elo"] == 2019    # 2000 + 19 (Radiant avg)
+    # Sans Henrik -> flat fallback +20 (independant de l'avg ELO du match).
+    assert elo_col.find_one({"_id": "0"})["elo"] == 2020
 
 
 async def test_validated_b_distributes_correctly():
@@ -618,13 +620,13 @@ async def test_validated_b_distributes_correctly():
     await _vote_and_verify(cog, guild, match_id, choice="b", db=bot_module.db)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    # team_b (5..9) gagnent +15 -> 2015
+    # team_b (5..9) gagnent +20 (flat sans Henrik) -> 2020
     for i in range(5, 10):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 2015
+        assert elo_col.find_one({"_id": str(i)})["elo"] == 2020
         assert elo_col.find_one({"_id": str(i)})["wins"] == 1
-    # team_a (0..4) perdent -15 -> 1985
+    # team_a (0..4) perdent -20 -> 1980
     for i in range(5):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 1985
+        assert elo_col.find_one({"_id": str(i)})["elo"] == 1980
         assert elo_col.find_one({"_id": str(i)})["losses"] == 1
 
 
