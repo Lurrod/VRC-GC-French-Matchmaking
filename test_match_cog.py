@@ -152,7 +152,7 @@ async def test_on_queue_full_persists_match():
     match = repository.get_match(bot_module.db, 42, match_id)
     assert match is not None
     assert match["status"] == "pending"
-    assert match["map"] in ("Breeze", "Bind", "Lotus", "Fracture", "Split", "Haven", "Pearl")
+    assert match["map"] in ("Breeze", "Ascent", "Lotus", "Fracture", "Split", "Haven", "Pearl")
     assert match["category_name"] == "Match #1"
     assert match["message_id"] == 555
     assert match["channel_id"] == prep.id      # poste dans match-preparation
@@ -393,10 +393,10 @@ def test_build_match_embed_shows_all_players_and_map():
 
     players = [Player(id=i, name=f"P{i}", elo=1500 + i*50) for i in range(10)]
     teams = balance_teams(players)
-    plan = MatchPlan(teams=teams, map_name="Bind", lobby_leader=players[0], category_name="Match #1")
+    plan = MatchPlan(teams=teams, map_name="Ascent", lobby_leader=players[0], category_name="Match #1")
 
     embed = build_match_embed(plan, "MyGuild")
-    assert "Bind" in embed.description
+    assert "Ascent" in embed.description
     assert "<@0>" in embed.description  # leader
     fields_str = " ".join(f.value for f in embed.fields)
     for i in range(10):

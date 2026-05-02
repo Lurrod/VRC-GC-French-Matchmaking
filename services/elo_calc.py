@@ -8,7 +8,7 @@ from typing import Final
 # ── Constantes ────────────────────────────────────────────────────
 ELO_START: Final[int] = 0
 MAPS:      Final[tuple[str, ...]] = (
-    "Breeze", "Bind", "Lotus", "Fracture", "Split", "Haven", "Pearl",
+    "Breeze", "Ascent", "Lotus", "Fracture", "Split", "Haven", "Pearl",
 )
 
 

@@ -94,7 +94,7 @@ def test_plan_match_returns_balanced_teams_and_random_choices():
     assert len(plan.teams.team_a) == 5
     assert len(plan.teams.team_b) == 5
     # avec rng seede : on peut verifier la stabilite
-    assert plan.map_name in ("Breeze", "Bind", "Lotus", "Fracture", "Split", "Haven", "Pearl")
+    assert plan.map_name in ("Breeze", "Ascent", "Lotus", "Fracture", "Split", "Haven", "Pearl")
     assert plan.lobby_leader in players
     assert plan.category_name == "Match #1"
 

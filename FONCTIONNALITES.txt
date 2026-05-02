@@ -106,7 +106,7 @@ Quand 10 joueurs sont en queue :
   3. Trouve une categorie "Match #1", "Match #2" ou "Match #3" dont les vocaux
      "Team 1" et "Team 2" sont vides
   4. Choisit aleatoirement :
-       - Une map parmi : Breeze, Bind, Lotus, Fracture, Split, Haven, Pearl
+       - Une map parmi : Breeze, Ascent, Lotus, Fracture, Split, Haven, Pearl
        - Un lobby leader parmi les 10 joueurs (chargé de creer le lobby Valorant)
   5. Poste un message qui mentionne (@) les 10 joueurs avec un embed contenant :
        - La map choisie

@@ -202,7 +202,7 @@ def test_get_match_history_bypasses_cache():
         _mock_response(200, {"status": 200, "data": []}),
         _mock_response(200, {"status": 200, "data": []}),
         _mock_response(200, {"status": 200, "data": [{
-            "metadata": {"matchid": "x", "mode": "Custom Game", "map": "Bind",
+            "metadata": {"matchid": "x", "mode": "Custom Game", "map": "Ascent",
                          "game_start": 0, "rounds_played": 0},
             "teams": {}, "players": {"all_players": []},
         }]}),
