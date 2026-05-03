@@ -14,10 +14,10 @@ from services.elo_updater import (
 @pytest.mark.parametrize("avg,change", [
     (0,    1),     # plancher : empeche match a zero ELO apres reset global
     (300,  2),
-    (2100, 13),     # sous le floor (Immortal-)
-    (2400, 15),    # Immortal 1 = baseline
-    (2700, 17),    # Immortal 3
-    (3000, 19),    # Radiant
+    (2100, 14),     # sous le floor (Immortal-)
+    (2400, 16),    # Immortal 1 = baseline
+    (2700, 18),    # Immortal 3
+    (3000, 20),    # Radiant
 ])
 def test_compute_match_elo_change(avg, change):
     """Zero-sum strict : gain == loss."""
@@ -67,9 +67,9 @@ def test_validated_a_winners_get_gain():
     match = _make_match(status="validated_a", elo=2400)
     outcome = apply_match_validation(bot_module.db, 42, match)
 
-    # Sans multipliers (Henrik introuvable) -> fallback flat 20.
-    assert outcome.gain == 20
-    assert outcome.loss == 20
+    # Sans multipliers (Henrik introuvable) -> fallback flat 16.
+    assert outcome.gain == 16
+    assert outcome.loss == 16
     assert outcome.avg_elo == 2400
 
     # Toutes les changes : team_a (0..4) gagne, team_b (5..9) perd
@@ -97,13 +97,13 @@ def test_winners_get_plus_gain_in_db():
     # constate que les perdants (a 0 ELO) ne peuvent rien perdre, et
     # neutralise les gains gagnants pour rester zero-sum.
     _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
-    match = _make_match(elo=2400)  # avg=2400, sans multipliers -> flat 20
+    match = _make_match(elo=2400)  # avg=2400, sans multipliers -> flat 16
     apply_match_validation(bot_module.db, 42, match)
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
         doc = elo_col.find_one({"_id": str(i)})
-        assert doc["elo"] == 2020  # 2000 + 20 (flat fallback)
+        assert doc["elo"] == 2016  # 2000 + 16 (flat fallback)
         assert doc["wins"] == 1
         assert doc["losses"] == 0
 
@@ -127,11 +127,11 @@ def test_loser_existing_elo_decreases_correctly():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     elo_col.insert_one({"_id": "5", "name": "B0", "elo": 50, "wins": 0, "losses": 0})
 
-    match = _make_match(elo=2400)  # sans multipliers -> flat loss=20
+    match = _make_match(elo=2400)  # sans multipliers -> flat loss=16
     apply_match_validation(bot_module.db, 42, match)
 
     doc = elo_col.find_one({"_id": "5"})
-    assert doc["elo"] == 30
+    assert doc["elo"] == 34
     assert doc["losses"] == 1
 
 
@@ -150,17 +150,17 @@ def test_loser_floored_at_zero():
 def test_high_elo_match_bigger_swings_with_multipliers():
     import bot as bot_module
     # Avec multipliers ACS (Henrik OK), la formule proportionnelle s'applique.
-    # Radiant (avg=3000) zero-sum -> change=19. Sans multipliers, ce test
-    # mesurerait le flat 20 et perdrait son sens.
+    # Radiant (avg=3000) zero-sum -> change=20. Sans multipliers, ce test
+    # mesurerait le flat 16 et perdrait son sens.
     _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
     match = _make_match(elo=3000)
     multipliers = {str(i): 1.0 for i in range(10)}
     outcome = apply_match_validation(bot_module.db, 42, match, multipliers=multipliers)
-    assert outcome.gain == 19
-    assert outcome.loss == 19
+    assert outcome.gain == 20
+    assert outcome.loss == 20
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    assert elo_col.find_one({"_id": "0"})["elo"] == 2019  # 2000 + 19
+    assert elo_col.find_one({"_id": "0"})["elo"] == 2020  # 2000 + 20
 
 
 def test_low_elo_match_smaller_swings_with_multipliers():
@@ -174,14 +174,14 @@ def test_low_elo_match_smaller_swings_with_multipliers():
 
 
 def test_no_multipliers_uses_flat_fallback_regardless_of_avg():
-    """Sans multipliers, le base change est toujours 20 (flat), peu importe
+    """Sans multipliers, le base change est toujours 16 (flat), peu importe
     l'avg ELO du match. Verifie le nouveau comportement du fallback."""
     import bot as bot_module
     for avg in (300, 2400, 3000):
         match = _make_match(elo=avg)
         outcome = apply_match_validation(bot_module.db, 42, match)
-        assert outcome.gain == 20, f"avg={avg}, gain={outcome.gain}"
-        assert outcome.loss == 20, f"avg={avg}, loss={outcome.loss}"
+        assert outcome.gain == 16, f"avg={avg}, gain={outcome.gain}"
+        assert outcome.loss == 16, f"avg={avg}, loss={outcome.loss}"
 
 
 def test_existing_winner_keeps_history_and_adds_gain():
@@ -199,7 +199,7 @@ def test_existing_winner_keeps_history_and_adds_gain():
     apply_match_validation(bot_module.db, 42, match)
 
     doc = elo_col.find_one({"_id": "0"})
-    assert doc["elo"] == 220       # 200 + 20 (flat fallback sans multipliers)
+    assert doc["elo"] == 216       # 200 + 16 (flat fallback sans multipliers)
     assert doc["wins"] == 6        # 5 + 1
     assert doc["losses"] == 3      # inchange
 
@@ -214,9 +214,9 @@ def test_mixed_team_avg_elo():
     }
     outcome = apply_match_validation(bot_module.db, 42, match)
     # Avg total = (5*2200 + 5*2600) / 10 = 2400. Sans multipliers ->
-    # flat fallback 20, mais avg_elo reste informatif dans l'embed.
+    # flat fallback 16, mais avg_elo reste informatif dans l'embed.
     assert outcome.avg_elo == 2400
-    assert outcome.gain == 20
+    assert outcome.gain == 16
 
 
 def test_change_dataclass_fields():
@@ -226,14 +226,14 @@ def test_change_dataclass_fields():
     outcome = apply_match_validation(bot_module.db, 42, match)
 
     winner = next(c for c in outcome.changes if c.win)
-    assert winner.delta == 20  # flat fallback sans multipliers
+    assert winner.delta == 16  # flat fallback sans multipliers
     assert winner.old_elo == 2000
-    assert winner.new_elo == 2020
+    assert winner.new_elo == 2016
 
     loser = next(c for c in outcome.changes if not c.win)
-    assert loser.delta == -20
+    assert loser.delta == -16
     assert loser.old_elo == 2000
-    assert loser.new_elo == 1980
+    assert loser.new_elo == 1984
 
 
 # ── Zero-sum garanti avec multiplicateurs (fix audit #1) ──────────
@@ -280,7 +280,9 @@ def test_zero_sum_with_mixed_multipliers():
 
 def test_zero_sum_with_all_clamped_max():
     """Cas pathologique : tous gagnants clampes a 1.3, tous perdants a 0.7.
-    Sans le fix, sum_w=6.5, sum_l=3.5 -> deficit. Avec le fix : sum=0."""
+    Avec ancrage par-joueur (mult=1.0 -> +/-base), zero-sum tient encore
+    par symetrie (sum_w + sum_l = 2n=10), mais le total equipe scale
+    avec sum(mults)."""
     import bot as bot_module
     _seed_baseline_elo(bot_module.db, 42, range(10), baseline=10000)
     match = _make_match(status="validated_a", elo=2400)
@@ -292,9 +294,9 @@ def test_zero_sum_with_all_clamped_max():
         bot_module.db, 42, match, multipliers=multipliers,
     )
     assert sum(c.delta for c in outcome.changes) == 0
-    # Total gagnants = 5 * 15 = 75 (zero-sum strict)
+    # Chaque gagnant : round(16 * 1.3) = 21. Total = 5 * 21 = 105.
     winner_sum = sum(c.delta for c in outcome.changes if c.win)
-    assert winner_sum == 75
+    assert winner_sum == 105
 
 
 def test_winner_with_higher_mult_gains_more():

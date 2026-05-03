@@ -448,9 +448,25 @@ class MatchCog(commands.Cog):
             channel_id=prep_channel.id,
         )
 
-        # Etape 2 : envoyer l'annonce. Le @mention pingera les joueurs
-        # en notification meme si match-preparation est gate par le
-        # role (ils verront le message une fois le role grant).
+        # Etape 2 : grants de role AVANT d'annoncer. Sans le role
+        # `Match #N`, les joueurs ne voient pas le salon
+        # match-preparation, donc ne voient pas le message d'annonce
+        # (map, equipes, vocal a rejoindre). Best-effort : crash ici
+        # laisse roles partiels mais le match doc existe -> /match-cancel
+        # nettoie.
+        for uid in player_ids:
+            member = guild.get_member(int(uid))
+            if member is None:
+                continue
+            await _revoke_queue_role(member)
+            await _grant_match_role(member, free_cat_name)
+
+        leader_member = guild.get_member(int(plan.lobby_leader.id))
+        if leader_member is not None:
+            await _grant_match_role(leader_member, MATCH_HOST_ROLE_NAME)
+
+        # Etape 3 : envoyer l'annonce. Les joueurs ont desormais le
+        # role Match #N et peuvent voir le salon + le message.
         mentions = " ".join(f"<@{p.id}>" for p in players)
         embed    = build_match_embed(plan, guild.name)
         try:
@@ -474,7 +490,7 @@ class MatchCog(commands.Cog):
             )
             return None
 
-        # Etape 3 : associer le message_id au match doc. Sans ca,
+        # Etape 4 : associer le message_id au match doc. Sans ca,
         # `get_match_by_message` (utilise par VoteView) ne retrouve pas
         # le match au moment du vote.
         matches_col = repository.get_matches_col(self.db, guild.id)
@@ -483,29 +499,16 @@ class MatchCog(commands.Cog):
             {"_id": match_id}, {"$set": {"message_id": msg.id}},
         )
 
-        # Etape 3 : vider la queue immediatement apres la persistance.
+        # Etape 5 : vider la queue immediatement apres la persistance.
         # Empêche un re-trigger eventuel d'on_queue_full sur la meme queue.
         await asyncio.to_thread(
             repository.delete_active_queue, self.db, guild.id,
         )
 
-        # Etape 4 : grants de role (best-effort). Crash ici laisse roles
-        # partiels mais le match doc existe -> /match-cancel nettoie.
-        for uid in player_ids:
-            member = guild.get_member(int(uid))
-            if member is None:
-                continue
-            await _revoke_queue_role(member)
-            await _grant_match_role(member, free_cat_name)
-
-        leader_member = guild.get_member(int(plan.lobby_leader.id))
-        if leader_member is not None:
-            await _grant_match_role(leader_member, MATCH_HOST_ROLE_NAME)
-
-        # Etape 5 : deplacement vocal Waiting Room -> Waiting Match.
+        # Etape 6 : deplacement vocal Waiting Room -> Waiting Match.
         await self._move_players_to_match_vc(guild, free_cat_name, player_ids)
 
-        # Etape 6 : repose setup-queue (best-effort).
+        # Etape 7 : repose setup-queue (best-effort).
         queue_cog = self.bot.get_cog("QueueCog")
         if queue_cog is not None:
             try:

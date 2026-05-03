@@ -17,7 +17,7 @@ MAPS:      Final[tuple[str, ...]] = (
 IMMORTAL_FLOOR_ELO: Final[int] = 2400   # Immortal 1 (HenrikDev tier 24 * 100)
 ELO_REFERENCE:      Final[int] = IMMORTAL_FLOOR_ELO
 # Zero-sum strict : gain == loss. ELO injectee par match = 0.
-ELO_BASE_CHANGE:    Final[int] = 15     # gain et loss attendus a avg = ELO_REFERENCE
+ELO_BASE_CHANGE:    Final[int] = 16     # gain et loss attendus a avg = ELO_REFERENCE
 # Alias retro-compatibles (utilises par tests/code legacy)
 ELO_BASE_GAIN:      Final[int] = ELO_BASE_CHANGE
 ELO_BASE_LOSS:      Final[int] = ELO_BASE_CHANGE

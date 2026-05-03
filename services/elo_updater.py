@@ -25,7 +25,7 @@ VALIDATED_B: Final[str] = "validated_b"
 # a plat plutot que la valeur proportionnelle a l'avg ELO du match.
 # C'est plus lisible pour les joueurs et evite les variations bizarres
 # (15/17/19) selon le tier moyen.
-FLAT_FALLBACK_ELO_CHANGE: Final[int] = 20
+FLAT_FALLBACK_ELO_CHANGE: Final[int] = 16
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,7 @@ def apply_match_validation(
 
     avg_elo = elo_calc.compute_team_avg_elo(winners + losers)
     if multipliers is None:
-        # Pas de donnees Henrik : on applique +20/-20 a plat. La valeur
+        # Pas de donnees Henrik : on applique +16/-16 a plat. La valeur
         # proportionnelle (`compute_match_elo_change`) ne sert plus
         # qu'au cas pondere ACS, ou l'avg du match a un sens (les
         # multiplicateurs distribuent le total).
@@ -109,22 +109,22 @@ def apply_match_validation(
     winner_mults = [float(mults.get(str(p["id"]), 1.0)) for p in winners]
     loser_mults  = [float(mults.get(str(p["id"]), 1.0)) for p in losers]
 
-    winner_deltas = _distribute_team_deltas(
-        team_total=+base_gain * len(winners),
-        multipliers=winner_mults,
-        is_winner=True,
-    )
-    loser_deltas = _distribute_team_deltas(
-        team_total=-base_loss * len(losers),
-        multipliers=loser_mults,
-        is_winner=False,
-    )
+    # Distribution per-joueur ancree sur le multiplicateur :
+    #   gagnant : delta = +base * mult        (mult=1.0 -> +base pile)
+    #   perdant : delta = -base * (2 - mult)  (mult=1.0 -> -base pile)
+    # Le "joueur du milieu" (perf = moyenne d'equipe -> mult=1.0) recoit
+    # exactement base, quel que soit le scaling des coequipiers.
+    # Quand sum(mults) ≈ n par equipe (cas non-clamp), zero-sum tient
+    # encore naturellement ; sinon une legere inflation/deflation est
+    # acceptee comme prix de l'ancrage.
+    winner_deltas = [
+        int(round(+base_gain * m)) for m in winner_mults
+    ]
+    loser_deltas = [
+        int(round(-base_loss * (2.0 - m))) for m in loser_mults
+    ]
 
-    # Pre-fetch des ELO actuels des perdants pour clamper a 0 sans
-    # injecter d'ELO dans le systeme. Sans ce traitement, chaque ELO
-    # "non-perdable" (ex: perdant a 5 ELO doit perdre 15 -> ne perd que
-    # 5, le diff de 10 reste cree dans le systeme via les gains
-    # gagnants intacts) genere une inflation cumulative.
+    # Clamp a 0 pour les perdants : on ne descend jamais sous 0 ELO.
     loser_old_elos: list[int] = []
     for p in losers:
         doc = elo_col.find_one({"_id": str(p["id"])})
@@ -132,23 +132,10 @@ def apply_match_validation(
             int(doc.get("elo", elo_calc.ELO_START)) if doc else elo_calc.ELO_START
         )
     clamped_loser_deltas: list[int] = []
-    unrecoverable = 0  # somme >= 0 du "manque a perdre"
     for old_elo, delta in zip(loser_old_elos, loser_deltas):
         # delta est negatif. La perte maximale possible est -old_elo.
         max_loss_delta = -old_elo
-        clamped = max(max_loss_delta, delta)  # delta plus proche de 0
-        unrecoverable += clamped - delta      # >= 0
-        clamped_loser_deltas.append(clamped)
-
-    if unrecoverable > 0:
-        # Reduire le total des gains gagnants. Le residu est borne a 0
-        # (on ne distribue jamais de pertes aux gagnants).
-        new_winner_total = max(0, sum(winner_deltas) - unrecoverable)
-        winner_deltas = _distribute_team_deltas(
-            team_total=new_winner_total,
-            multipliers=winner_mults,
-            is_winner=True,
-        )
+        clamped_loser_deltas.append(max(max_loss_delta, delta))
 
     match_id = match_doc.get("_id")
     changes: list[PlayerEloChange] = []
@@ -164,46 +151,6 @@ def apply_match_validation(
         changes=tuple(changes),
         weighted=weighted,
     )
-
-
-def _distribute_team_deltas(
-    *,
-    team_total: int,
-    multipliers: list[float],
-    is_winner: bool,
-) -> list[int]:
-    """Distribue `team_total` (signe) sur n joueurs, ponderee par les multiplicateurs.
-
-    Garantit `sum(deltas) == team_total` exactement, meme apres arrondi entier.
-
-    Le poids individuel est :
-      - gagnant : mult            (mult eleve -> part plus grosse du gain)
-      - perdant : (2 - mult)      (mult eleve = bonne perf -> part plus petite de la perte)
-    """
-    n = len(multipliers)
-    if n == 0:
-        return []
-    weights = [m if is_winner else (2.0 - m) for m in multipliers]
-    total_weight = sum(weights)
-    if total_weight <= 0:
-        weights = [1.0] * n
-        total_weight = float(n)
-
-    raw     = [team_total * w / total_weight for w in weights]
-    deltas  = [int(round(r)) for r in raw]
-    diff    = team_total - sum(deltas)
-    if diff != 0:
-        # Distribue le residu d'arrondi sur les joueurs au plus gros reste
-        # fractionnaire, dans le sens approprie.
-        residuals = sorted(
-            range(n),
-            key=lambda i: (raw[i] - deltas[i]) * (1 if diff > 0 else -1),
-            reverse=True,
-        )
-        step = 1 if diff > 0 else -1
-        for k in range(abs(diff)):
-            deltas[residuals[k % n]] += step
-    return deltas
 
 
 def _apply_player(
