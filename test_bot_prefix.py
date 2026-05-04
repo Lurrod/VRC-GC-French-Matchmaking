@@ -115,7 +115,8 @@ async def test_win_grants_elo_with_admin(discord_bot, fake_guild):
     col = bot_module.get_elo_col(fake_guild.id)
     doc = col.find_one({"_id": str(target.id)})
     assert doc is not None, "Le joueur n'a pas ete cree en base"
-    assert doc["elo"] == 16, f"ELO attendu 16, recu {doc['elo']}"
+    # Pondération par position : slot 0 (joueur1) gagne +20.
+    assert doc["elo"] == 20, f"ELO attendu 20, recu {doc['elo']}"
     assert doc["wins"] == 1
 
 
@@ -125,7 +126,7 @@ async def test_lose_floors_elo_at_zero(discord_bot, fake_guild):
 
     admin   = fake_guild.members[0]
     target  = fake_guild.members[1]
-    partner = fake_guild.members[2]   # tire l'avg vers le haut pour declencher loss>0
+    partner = fake_guild.members[2]   # 2eme slot (joueur2)
     perms = discord.Permissions()
     perms.update(manage_guild=True)
     admin_role = await fake_guild.create_role(name="Admin", permissions=perms)
@@ -135,7 +136,7 @@ async def test_lose_floors_elo_at_zero(discord_bot, fake_guild):
     col.insert_one({"_id": str(target.id),  "name": target.display_name,  "elo": 5,    "wins": 0, "losses": 0})
     col.insert_one({"_id": str(partner.id), "name": partner.display_name, "elo": 2995, "wins": 0, "losses": 0})
 
-    # avg(5, 2995) = 1500 -> loss = 10 -> max(0, 5-10) = 0 pour target
+    # /lose pondéré par position : slot 0 (target) -> loss=10 -> max(0, 5-10) = 0
     await dpytest.message(f"!lose {target.mention} {partner.mention}")
 
     doc = col.find_one({"_id": str(target.id)})
