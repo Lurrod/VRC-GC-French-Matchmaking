@@ -11,19 +11,12 @@ from services.elo_updater import (
 
 
 # ── compute_match_elo_change (formule pure, zero-sum) ─────────────
-@pytest.mark.parametrize("avg,change", [
-    (0,    1),     # plancher : empeche match a zero ELO apres reset global
-    (300,  2),
-    (2100, 14),     # sous le floor (Immortal-)
-    (2400, 16),    # Immortal 1 = baseline
-    (2700, 18),    # Immortal 3
-    (3000, 20),    # Radiant
-])
-def test_compute_match_elo_change(avg, change):
-    """Zero-sum strict : gain == loss."""
+@pytest.mark.parametrize("avg", [0, 300, 2100, 2400, 2700, 3000, 5000])
+def test_compute_match_elo_change(avg):
+    """Zero-sum strict : gain == loss == ELO_BASE_CHANGE quelle que soit l'avg."""
     g, l = elo_calc.compute_match_elo_change(avg)
-    assert g == change
-    assert l == change
+    assert g == elo_calc.ELO_BASE_CHANGE
+    assert l == elo_calc.ELO_BASE_CHANGE
     assert g == l
 
 
@@ -147,30 +140,29 @@ def test_loser_floored_at_zero():
     assert doc["elo"] == 0
 
 
-def test_high_elo_match_bigger_swings_with_multipliers():
+def test_base_is_constant_with_multipliers_high_avg():
     import bot as bot_module
-    # Avec multipliers ACS (Henrik OK), la formule proportionnelle s'applique.
-    # Radiant (avg=3000) zero-sum -> change=20. Sans multipliers, ce test
-    # mesurerait le flat 16 et perdrait son sens.
+    # Base ELO_BASE_CHANGE=16 quelle que soit l'avg, meme avec multipliers ACS.
+    # Le scaling individuel est porte par les multiplicateurs, pas par l'avg.
     _seed_baseline_elo(bot_module.db, 42, range(10), baseline=2000)
     match = _make_match(elo=3000)
     multipliers = {str(i): 1.0 for i in range(10)}
     outcome = apply_match_validation(bot_module.db, 42, match, multipliers=multipliers)
-    assert outcome.gain == 20
-    assert outcome.loss == 20
+    assert outcome.gain == 16
+    assert outcome.loss == 16
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
-    assert elo_col.find_one({"_id": "0"})["elo"] == 2020  # 2000 + 20
+    assert elo_col.find_one({"_id": "0"})["elo"] == 2016  # 2000 + 16
 
 
-def test_low_elo_match_smaller_swings_with_multipliers():
+def test_base_is_constant_with_multipliers_low_avg():
     import bot as bot_module
-    # Avec multipliers : avg sous le floor (300) zero-sum -> change=2.
+    # Avec multipliers et avg basse (300) : la base reste 16, pas de scaling.
     match = _make_match(elo=300)
     multipliers = {str(i): 1.0 for i in range(10)}
     outcome = apply_match_validation(bot_module.db, 42, match, multipliers=multipliers)
-    assert outcome.gain == 2
-    assert outcome.loss == 2
+    assert outcome.gain == 16
+    assert outcome.loss == 16
 
 
 def test_no_multipliers_uses_flat_fallback_regardless_of_avg():

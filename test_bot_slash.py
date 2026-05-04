@@ -132,8 +132,8 @@ async def test_slash_win_5_players_distributes_elo_v2():
         assert doc["wins"] == 1
 
 
-async def test_slash_win_uses_server_avg_when_seeded():
-    """Le gain est proportionnel a l'avg de l'ELO serveur (elo_<guild>.elo)."""
+async def test_slash_win_base_is_constant_regardless_of_avg():
+    """Le gain de base est ELO_BASE_CHANGE (16) quelle que soit l'avg du match."""
     import bot as bot_module
 
     admin = _fake_member(1, "Admin", manage_guild=True)
@@ -141,7 +141,7 @@ async def test_slash_win_uses_server_avg_when_seeded():
     guild = _fake_guild(42, members=[admin] + targets)
     inter = _fake_interaction(admin, guild)
 
-    # Seed une ELO serveur de 3000 (Radiant) -> change = 20 (zero-sum)
+    # Seed une ELO serveur de 3000 (Radiant) : la base reste 16, pas de scaling.
     col = bot_module.get_elo_col(42)
     for t in targets:
         col.insert_one({
@@ -153,7 +153,7 @@ async def test_slash_win_uses_server_avg_when_seeded():
 
     for t in targets:
         doc = col.find_one({"_id": str(t.id)})
-        assert doc["elo"] == 3020, f"{t.display_name}: attendu 3020 (3000 + 20), recu {doc['elo']}"
+        assert doc["elo"] == 3016, f"{t.display_name}: attendu 3016 (3000 + 16), recu {doc['elo']}"
 
 
 # ── /lose ─────────────────────────────────────────────────────────
@@ -170,11 +170,11 @@ async def test_slash_lose_floors_at_zero():
     col.insert_one({"_id": "2", "name": "Bob",   "elo": 5,    "wins": 0, "losses": 0})
     col.insert_one({"_id": "3", "name": "Boost", "elo": 2995, "wins": 0, "losses": 0})
 
-    # avg(5, 2995) = 1500 -> change zero-sum = round(16 * 1500/2400) = 10. Bob: max(0, 5 - 10) = 0
+    # Base constante = 16 quelle que soit l'avg. Bob: max(0, 5 - 16) = 0, Boost: 2995 - 16 = 2979.
     await bot_module.lose.callback(inter, joueur1=target, joueur2=partner)
 
     assert col.find_one({"_id": "2"})["elo"] == 0
-    assert col.find_one({"_id": "3"})["elo"] == 2985
+    assert col.find_one({"_id": "3"})["elo"] == 2979
 
 
 # ── /leaderboard + LeaderboardView (le bug initial) ───────────────

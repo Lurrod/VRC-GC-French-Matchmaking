@@ -32,18 +32,12 @@ def compute_team_avg_elo(players: list[dict]) -> int:
 
 def compute_match_elo_change(avg_match_elo: int) -> tuple[int, int]:
     """
-    Renvoie (gain, loss) zero-sum strict : gain == loss, proportionnels
-    a l'ELO moyen du match.
+    Renvoie (gain, loss) zero-sum strict : gain == loss = ELO_BASE_CHANGE.
 
-    Calibre pour un serveur Immortal+ :
-      - avg = 2400 (Immortal 1)  -> (15, 15)
-      - avg = 2700 (Immortal 3)  -> (17, 17)
-      - avg = 3000 (Radiant)     -> (19, 19)
+    La base est constante (16) quelle que soit la moyenne d'ELO du match.
+    Le scaling par performance individuelle est applique en aval via les
+    multiplicateurs ACS (cf. elo_updater.distribute / apply_match_validation).
     """
     if avg_match_elo < 0:
         raise ValueError(f"avg_match_elo doit etre >= 0, recu {avg_match_elo}")
-    change = round(ELO_BASE_CHANGE * avg_match_elo / ELO_REFERENCE)
-    # Plancher a 1 pour garantir une progression meme apres reset global
-    # (avg=0 produirait sinon (0, 0) → match joue pour rien).
-    change = max(1, change)
-    return change, change
+    return ELO_BASE_CHANGE, ELO_BASE_CHANGE
