@@ -33,6 +33,11 @@ MONGO_URL = os.environ.get("MONGO_URL")
 ELO_START = elo_calc.ELO_START
 MAPS      = list(elo_calc.MAPS)
 
+# Pondération ELO par position de joueur (slot 1..5) pour /win et /lose.
+# Le premier slot encaisse le plus gros gain / la plus petite perte.
+WIN_DELTAS_BY_SLOT:  tuple[int, ...] = (20, 18, 17, 16, 15)
+LOSE_DELTAS_BY_SLOT: tuple[int, ...] = (10, 10, 12, 13, 15)
+
 # ── MongoDB ────────────────────────────────────────────────────
 # retryWrites/retryReads sont True par defaut depuis pymongo 4.x mais on les
 # explicite pour resilience aux blips reseau. serverSelectionTimeoutMS=5000
@@ -268,15 +273,16 @@ async def win(
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(interaction.guild_id)
 
-    avg_elo, gain, _ = _compute_match_change_for_members(interaction.guild_id, players)
+    avg_elo, _, _ = _compute_match_change_for_members(interaction.guild_id, players)
 
     embed = discord.Embed(
         title="Resultats - Victoire enregistree !",
-        description=f"Avg ELO du groupe : **{avg_elo}** -> +**{gain}** ELO chacun",
+        description=f"Avg ELO du groupe : **{avg_elo}** -> gains pondérés par position (joueur1→joueur5)",
         color=0x2ecc71,
         timestamp=datetime.now(timezone.utc),
     )
-    for member in players:
+    for slot, member in enumerate(players):
+        gain = WIN_DELTAS_BY_SLOT[slot]
         get_player(col, member)
         old_doc = col.find_one_and_update(
             {"_id": str(member.id)},
@@ -316,15 +322,16 @@ async def lose(
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(interaction.guild_id)
 
-    avg_elo, _, loss = _compute_match_change_for_members(interaction.guild_id, players)
+    avg_elo, _, _ = _compute_match_change_for_members(interaction.guild_id, players)
 
     embed = discord.Embed(
         title="Resultats - Defaite enregistree !",
-        description=f"Avg ELO du groupe : **{avg_elo}** -> -**{loss}** ELO chacun",
+        description=f"Avg ELO du groupe : **{avg_elo}** -> pertes pondérées par position (joueur1→joueur5)",
         color=0xe74c3c,
         timestamp=datetime.now(timezone.utc),
     )
-    for member in players:
+    for slot, member in enumerate(players):
+        loss = LOSE_DELTAS_BY_SLOT[slot]
         get_player(col, member)
         old_doc = col.find_one_and_update(
             {"_id": str(member.id)},
@@ -715,15 +722,16 @@ async def win_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = Non
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(ctx.guild.id)
 
-    avg_elo, gain, _ = _compute_match_change_for_members(ctx.guild.id, players)
+    avg_elo, _, _ = _compute_match_change_for_members(ctx.guild.id, players)
 
     embed = discord.Embed(
         title="🏆 Résultats — Victoire enregistrée !",
-        description=f"Avg ELO du groupe : **{avg_elo}** -> +**{gain}** ELO chacun",
+        description=f"Avg ELO du groupe : **{avg_elo}** -> gains pondérés par position (joueur1→joueur5)",
         color=0x2ecc71,
         timestamp=datetime.now(timezone.utc),
     )
-    for member in players:
+    for slot, member in enumerate(players):
+        gain = WIN_DELTAS_BY_SLOT[slot]
         get_player(col, member)
         old_doc = col.find_one_and_update(
             {"_id": str(member.id)},
@@ -747,15 +755,16 @@ async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = No
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(ctx.guild.id)
 
-    avg_elo, _, loss = _compute_match_change_for_members(ctx.guild.id, players)
+    avg_elo, _, _ = _compute_match_change_for_members(ctx.guild.id, players)
 
     embed = discord.Embed(
         title="💀 Résultats — Défaite enregistrée !",
-        description=f"Avg ELO du groupe : **{avg_elo}** -> -**{loss}** ELO chacun",
+        description=f"Avg ELO du groupe : **{avg_elo}** -> pertes pondérées par position (joueur1→joueur5)",
         color=0xe74c3c,
         timestamp=datetime.now(timezone.utc),
     )
-    for member in players:
+    for slot, member in enumerate(players):
+        loss = LOSE_DELTAS_BY_SLOT[slot]
         get_player(col, member)
         old_doc = col.find_one_and_update(
             {"_id": str(member.id)},
