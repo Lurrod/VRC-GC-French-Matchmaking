@@ -13,6 +13,40 @@ from pymongo.errors import DuplicateKeyError
 logger = logging.getLogger(__name__)
 
 
+# Tuple ordonne des queue types supportes. L'ordre influence l'affichage
+# (boucles de pre-post leaderboards, /setup) : Pro en premier, GC en dernier.
+QUEUE_TYPES: tuple[str, ...] = ("pro", "open", "gc")
+
+
+def is_valid_queue_type(queue_type: str) -> bool:
+    return queue_type in QUEUE_TYPES
+
+
+def _check_queue_type(queue_type: str) -> None:
+    if not is_valid_queue_type(queue_type):
+        raise ValueError(
+            f"queue_type invalide : {queue_type!r}. Attendus : {QUEUE_TYPES}"
+        )
+
+
+def player_doc_id(user_id: int | str, queue_type: str) -> str:
+    """Compound _id pour un doc joueur dans elo_<guild>."""
+    _check_queue_type(queue_type)
+    return f"{user_id}:{queue_type}"
+
+
+def active_queue_id(queue_type: str) -> str:
+    """_id pour la queue active d'un type donne dans queue_<guild>."""
+    _check_queue_type(queue_type)
+    return f"active:{queue_type}"
+
+
+def leaderboard_state_id(queue_type: str) -> str:
+    """_id pour le state du leaderboard d'un type dans leaderboard_state_<guild>."""
+    _check_queue_type(queue_type)
+    return f"current:{queue_type}"
+
+
 # Cache des collections deja indexees pour eviter de re-issuer create_index a
 # chaque call (idempotent cote Mongo, mais inutile en perf).
 _indexed_collections: set[str] = set()
