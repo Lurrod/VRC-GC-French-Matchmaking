@@ -8,9 +8,10 @@ Commandes :
 Aucun gate-keeping : la verification du rang des nouveaux membres est
 faite manuellement a l'entree sur le serveur Discord.
 
-Le link Riot seede simplement l'ELO de depart a LINK_BASE_ELO (2000)
-dans `elo_<guild_id>`. Apres le seed, l'ELO Riot n'a plus aucun impact :
-seuls les wins/losses du serveur modifient l'ELO.
+Le link Riot persiste uniquement la metadata du compte Riot (PUUID,
+pseudo, tag) pour permettre les verifications post-match via l'API
+HenrikDev. Aucun ELO n'est seede : les joueurs demarrent a `ELO_START`
+(=2000) au moment ou ils apparaissent dans une queue donnee.
 """
 
 from __future__ import annotations
@@ -37,10 +38,6 @@ from services.riot_api import (
 
 # Serveur reserve aux EU
 DEFAULT_REGION = "eu"
-
-# ELO de depart distribuee a tout joueur qui lie son compte Riot.
-# Cette valeur s'ajoute a l'ELO bot deja accumulee (matches anterieurs au link).
-LINK_BASE_ELO = 2000
 
 
 class RiotLinkCog(commands.Cog):
@@ -93,11 +90,10 @@ class RiotLinkCog(commands.Cog):
             )
             return
 
-        # 2.5) Dedup PUUID : un compte Riot ne peut etre lie qu'a un
-        # seul compte Discord par serveur. Sans ce check, un joueur
-        # pourrait farmer plusieurs fois le seed LINK_BASE_ELO en liant
-        # le meme compte Riot a plusieurs comptes Discord, et tenir 2
-        # places en queue avec un seul compte de jeu.
+        # 2.5) Dedup PUUID : un compte Riot ne peut etre lie qu'a un seul
+        # compte Discord par serveur. Sans ce check, un joueur pourrait
+        # tenir 2 places en queue avec un seul compte de jeu via deux
+        # comptes Discord lies au meme PUUID.
         existing = await asyncio.to_thread(
             repository.find_riot_account_by_puuid,
             self.db, interaction.guild_id, account.puuid,
@@ -111,18 +107,9 @@ class RiotLinkCog(commands.Cog):
             )
             return
 
-        # 3) Seed atomique de l'ELO de depart (idempotent)
-        # Premier link : elo_<guild>.elo += LINK_BASE_ELO (+ ELO bot deja accumulee)
-        # Re-link apres unlink : aucun changement (linked_once=True).
-        final_elo, seeded_now = repository.seed_elo_with_riot_base(
-            self.db,
-            interaction.guild_id,
-            interaction.user.id,
-            riot_base_elo=LINK_BASE_ELO,
-            display_name=interaction.user.display_name,
-        )
-
-        # 4) Persister la metadata Riot (utilisee pour la queue gate-keep)
+        # 3) Persister la metadata Riot (utilisee pour la queue gate-keep
+        # et la verification post-match via HenrikDev). Aucun seed ELO :
+        # l'ELO de chaque queue demarre a ELO_START au premier match.
         repository.link_riot_account(
             self.db,
             guild_id=interaction.guild_id,
@@ -144,13 +131,6 @@ class RiotLinkCog(commands.Cog):
         embed.add_field(name="Riot ID", value=f"**{name}#{tag}**", inline=True)
         embed.add_field(name="Region", value=region.upper(),       inline=True)
         embed.add_field(name="Rang actuel", value=mmr.tier_name,   inline=True)
-        embed.add_field(name="ELO serveur", value=f"**{final_elo}**", inline=True)
-        if not seeded_now:
-            embed.add_field(
-                name="ℹ️ Note",
-                value="ELO inchangee (deja initialisee lors d'un link precedent).",
-                inline=False,
-            )
         embed.set_footer(text=f"Discord: {interaction.user.display_name}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 

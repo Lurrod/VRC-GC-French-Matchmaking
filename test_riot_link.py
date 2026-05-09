@@ -94,7 +94,7 @@ async def test_link_riot_rate_limited():
     assert "rate-limited" in args[0]
 
 
-async def test_link_riot_seeds_2000_elo_and_persists_metadata():
+async def test_link_riot_persists_metadata_without_seeding_elo():
     import bot as bot_module
     client = _fake_riot_client(
         account=Account(puuid="abc", name="Player", tag="EUW", region="eu"),
@@ -114,19 +114,19 @@ async def test_link_riot_seeds_2000_elo_and_persists_metadata():
     assert doc["puuid"]       == "abc"
     assert doc["source"]      == "link_base"
 
-    # ELO serveur seedee a 2000 (LINK_BASE_ELO)
-    elo_doc = repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1"})
-    assert elo_doc["elo"]         == 2000
-    assert elo_doc["linked_once"] is True
+    # Aucun seed ELO : la collection elo_<guild> reste vide tant que le
+    # joueur n'a pas joue dans une queue.
+    assert repository.get_elo_col(bot_module.db, 42).count_documents({}) == 0
 
     embed = inter.followup.send.call_args.kwargs["embed"]
     fields = {f.name: f.value for f in embed.fields}
     assert fields["Riot ID"] == "**Player#EUW**"
-    assert "2000" in fields["ELO serveur"]
+    # Pas de champ "ELO serveur" : on n'expose plus de chiffre apres link.
+    assert "ELO serveur" not in fields
 
 
 async def test_link_riot_accepts_any_rank():
-    """Aucun gate-keeping rang : meme un Iron recoit 2000 ELO."""
+    """Aucun gate-keeping rang : link sans condition de rang Riot."""
     import bot as bot_module
     client = _fake_riot_client(
         account=Account(puuid="abc", name="Iron", tag="EUW", region="eu"),
@@ -139,18 +139,20 @@ async def test_link_riot_accepts_any_rank():
 
     from services import repository
     assert repository.get_riot_account(bot_module.db, 42, 1) is not None
-    elo_doc = repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1"})
-    assert elo_doc["elo"] == 2000
+    # Aucun seed ELO meme pour un Iron : on persiste seulement la metadata.
+    assert repository.get_elo_col(bot_module.db, 42).count_documents({}) == 0
 
 
-async def test_link_riot_adds_prior_bot_elo():
-    """ELO bot existante (matches avant link) s'ajoute aux 2000 du link."""
+async def test_link_riot_does_not_touch_existing_elo():
+    """Si un doc ELO existe deja (autre queue, ancien match), /link ne le
+    modifie pas. Le link n'a aucune incidence sur les ELO accumulees."""
     import bot as bot_module
     from services import repository
 
-    # Seed : 200 ELO bot accumulees avant le link
+    # ELO existante dans la queue Open (compound _id <user>:open)
     repository.get_elo_col(bot_module.db, 42).insert_one({
-        "_id": "1", "name": "Jet", "elo": 200, "wins": 5, "losses": 2,
+        "_id": "1:open", "user_id": "1", "queue_type": "open",
+        "name": "Jet", "elo": 2200, "wins": 5, "losses": 2,
     })
 
     client = _fake_riot_client(
@@ -162,24 +164,21 @@ async def test_link_riot_adds_prior_bot_elo():
 
     await cog.link_riot.callback(cog, inter, riot_id="Player#EUW")
 
-    elo_doc = repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1"})
-    assert elo_doc["elo"]         == 2200    # 200 + 2000
-    assert elo_doc["linked_once"] is True
-    assert elo_doc["wins"]        == 5       # stats preservees
-    assert elo_doc["losses"]      == 2
-
-    embed = inter.followup.send.call_args.kwargs["embed"]
-    fields = {f.name: f.value for f in embed.fields}
-    assert "2200" in fields["ELO serveur"]
+    # Le doc ELO existant n'a pas bouge.
+    elo_doc = repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1:open"})
+    assert elo_doc["elo"]    == 2200
+    assert elo_doc["wins"]   == 5
+    assert elo_doc["losses"] == 2
 
 
-async def test_link_riot_seed_is_idempotent_after_unlink_relink():
-    """Apres /link, /unlink, /link, les 2000 ELO ne sont ajoutees qu'une fois."""
+async def test_link_unlink_relink_does_not_change_elo():
+    """/link, /unlink, /link n'a aucune incidence sur l'ELO accumulee."""
     import bot as bot_module
     from services import repository
 
     repository.get_elo_col(bot_module.db, 42).insert_one({
-        "_id": "1", "name": "Jet", "elo": 200, "wins": 5, "losses": 2,
+        "_id": "1:open", "user_id": "1", "queue_type": "open",
+        "name": "Jet", "elo": 2200, "wins": 5, "losses": 2,
     })
 
     client = _fake_riot_client()
@@ -187,18 +186,14 @@ async def test_link_riot_seed_is_idempotent_after_unlink_relink():
     inter = _fake_interaction(_fake_member(1, "Jet"), guild_id=42)
 
     await cog.link_riot.callback(cog, inter, riot_id="Player#EUW")
-    assert repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1"})["elo"] == 2200
+    assert repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1:open"})["elo"] == 2200
 
     await cog.unlink_riot.callback(cog, _fake_interaction(_fake_member(1), guild_id=42))
-    assert repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1"})["elo"] == 2200
+    assert repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1:open"})["elo"] == 2200
 
     inter2 = _fake_interaction(_fake_member(1, "Jet"), guild_id=42)
     await cog.link_riot.callback(cog, inter2, riot_id="Player#EUW")
-    assert repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1"})["elo"] == 2200
-
-    embed = inter2.followup.send.call_args.kwargs["embed"]
-    fields = {f.name: f.value for f in embed.fields}
-    assert "ℹ️ Note" in fields
+    assert repository.get_elo_col(bot_module.db, 42).find_one({"_id": "1:open"})["elo"] == 2200
 
 
 # ── /unlink-riot ──────────────────────────────────────────────────
