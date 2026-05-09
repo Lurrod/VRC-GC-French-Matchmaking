@@ -162,3 +162,24 @@ def test_close_active_queue_per_type():
     close_active_queue(db, guild_id=42, queue_type="pro")
     pro = get_active_queue(db, guild_id=42, queue_type="pro")
     assert pro["status"] == "forming"
+
+
+from services.repository import (
+    get_leaderboard_message_id,
+    set_leaderboard_message_id,
+    clear_leaderboard_message_id,
+)
+
+
+def test_leaderboard_message_id_per_queue_type():
+    db = mongomock.MongoClient(tz_aware=True).db
+    set_leaderboard_message_id(db, guild_id=42, queue_type="pro", message_id=111)
+    set_leaderboard_message_id(db, guild_id=42, queue_type="open", message_id=222)
+
+    assert get_leaderboard_message_id(db, guild_id=42, queue_type="pro") == 111
+    assert get_leaderboard_message_id(db, guild_id=42, queue_type="open") == 222
+    assert get_leaderboard_message_id(db, guild_id=42, queue_type="gc") is None
+
+    clear_leaderboard_message_id(db, guild_id=42, queue_type="pro")
+    assert get_leaderboard_message_id(db, guild_id=42, queue_type="pro") is None
+    assert get_leaderboard_message_id(db, guild_id=42, queue_type="open") == 222

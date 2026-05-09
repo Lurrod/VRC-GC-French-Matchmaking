@@ -580,9 +580,12 @@ def get_leaderboard_state_col(db: Database, guild_id: int | str) -> Collection:
 
 
 def get_leaderboard_message_id(
-    db: Database, guild_id: int | str,
+    db: Database, guild_id: int | str, queue_type: str,
 ) -> int | None:
-    doc = get_leaderboard_state_col(db, guild_id).find_one({"_id": "current"})
+    _check_queue_type(queue_type)
+    doc = get_leaderboard_state_col(db, guild_id).find_one(
+        {"_id": leaderboard_state_id(queue_type)}
+    )
     if not doc:
         return None
     mid = doc.get("message_id")
@@ -590,19 +593,23 @@ def get_leaderboard_message_id(
 
 
 def set_leaderboard_message_id(
-    db: Database, guild_id: int | str, message_id: int,
+    db: Database, guild_id: int | str, queue_type: str, message_id: int,
 ) -> None:
+    _check_queue_type(queue_type)
     get_leaderboard_state_col(db, guild_id).update_one(
-        {"_id": "current"},
+        {"_id": leaderboard_state_id(queue_type)},
         {"$set": {"message_id": int(message_id)}},
         upsert=True,
     )
 
 
 def clear_leaderboard_message_id(
-    db: Database, guild_id: int | str,
+    db: Database, guild_id: int | str, queue_type: str,
 ) -> None:
-    get_leaderboard_state_col(db, guild_id).delete_one({"_id": "current"})
+    _check_queue_type(queue_type)
+    get_leaderboard_state_col(db, guild_id).delete_one(
+        {"_id": leaderboard_state_id(queue_type)}
+    )
 
 
 def get_applications_col(db: Database, guild_id: int | str) -> Collection:
