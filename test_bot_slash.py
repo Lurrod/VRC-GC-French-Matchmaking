@@ -311,10 +311,10 @@ async def test_slash_elomodify_add():
     guild = _fake_guild(42, members=[admin, target])
     inter = _fake_interaction(admin, guild)
 
-    await bot_module.elomodify.callback(inter, joueur=target, action="add", montant=50)
+    await bot_module.elomodify.callback(inter, queue="open", joueur=target, action="add", montant=50)
 
     col = bot_module.get_elo_col(42)
-    doc = col.find_one({"_id": "2"})
+    doc = col.find_one({"_id": "2:open"})
     assert doc["elo"] == 2050
 
 
@@ -327,11 +327,12 @@ async def test_slash_elomodify_remove_floors_at_zero():
     inter = _fake_interaction(admin, guild)
 
     col = bot_module.get_elo_col(42)
-    col.insert_one({"_id": "2", "name": "Bob", "elo": 30, "wins": 0, "losses": 0})
+    col.insert_one({"_id": "2:open", "user_id": "2", "queue_type": "open",
+                    "name": "Bob", "elo": 30, "wins": 0, "losses": 0})
 
-    await bot_module.elomodify.callback(inter, joueur=target, action="remove", montant=100)
+    await bot_module.elomodify.callback(inter, queue="open", joueur=target, action="remove", montant=100)
 
-    doc = col.find_one({"_id": "2"})
+    doc = col.find_one({"_id": "2:open"})
     assert doc["elo"] == 0  # max(0, 30 - 100)
 
 

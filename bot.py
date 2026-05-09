@@ -475,13 +475,16 @@ async def resetelo(interaction: discord.Interaction, joueur: discord.Member = No
     await _refresh_leaderboard_safe(interaction.guild)
 
 # ── /elomodify ─────────────────────────────────────────────────
-@tree.command(name="elomodify", description="Ajoute ou enleve de l'ELO a un joueur")
-@app_commands.describe(joueur="Le joueur", action="Ajouter ou enlever", montant="Nombre d'ELO")
-@app_commands.choices(action=[
-    app_commands.Choice(name="+ Ajouter", value="add"),
-    app_commands.Choice(name="- Enlever", value="remove"),
-])
-async def elomodify(interaction: discord.Interaction, joueur: discord.Member, action: str, montant: int):
+@tree.command(name="elomodify", description="Ajoute ou enleve de l'ELO a un joueur dans une queue")
+@app_commands.describe(queue="Type de queue", joueur="Le joueur", action="Ajouter ou enlever", montant="Nombre d'ELO")
+@app_commands.choices(
+    queue=_QUEUE_CHOICES,
+    action=[
+        app_commands.Choice(name="+ Ajouter", value="add"),
+        app_commands.Choice(name="- Enlever", value="remove"),
+    ],
+)
+async def elomodify(interaction: discord.Interaction, queue: str, joueur: discord.Member, action: str, montant: int):
     if not has_access(interaction):
         await interaction.response.send_message("Pas la permission.", ephemeral=True)
         return
@@ -492,12 +495,10 @@ async def elomodify(interaction: discord.Interaction, joueur: discord.Member, ac
         )
         return
     col = get_elo_col(interaction.guild_id)
-    get_player(col, joueur)
+    get_player(col, joueur, queue)
     delta = montant if action == "add" else -montant
-    # Pipeline update + return BEFORE : un seul aller-retour, atomique,
-    # et on recupere l'ancien ELO pour l'affichage.
     old_doc = col.find_one_and_update(
-        {"_id": str(joueur.id)},
+        {"_id": repository.player_doc_id(joueur.id, queue)},
         [{"$set": {"elo": {"$max": [0, {"$add": [{"$ifNull": ["$elo", 0]}, delta]}]}}}],
         return_document=ReturnDocument.BEFORE,
     )
@@ -506,27 +507,30 @@ async def elomodify(interaction: discord.Interaction, joueur: discord.Member, ac
     if action == "add":
         color = 0x2ecc71
         label = f"+{montant}"
-        title = "➕ ELO ajouté"
+        title = f"➕ ELO {queue.upper()} ajouté"
     else:
         color = 0xe74c3c
         label = f"-{montant}"
-        title = "➖ ELO retiré"
+        title = f"➖ ELO {queue.upper()} retiré"
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur",       value=joueur.mention,                    inline=True)
     embed.add_field(name="Modification", value=label,                             inline=True)
     embed.add_field(name="Nouvel ELO",   value=f"**{new}** (etait {old})",        inline=True)
     embed.set_footer(text=f"Par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
-    await _refresh_leaderboard_safe(interaction.guild)
+    await _refresh_leaderboard_safe(interaction.guild, queue)
 
 # ── /winmodify ─────────────────────────────────────────────────
-@tree.command(name="winmodify", description="Ajoute ou enleve des victoires a un joueur")
-@app_commands.describe(joueur="Le joueur", action="Ajouter ou enlever", montant="Nombre de victoires")
-@app_commands.choices(action=[
-    app_commands.Choice(name="+ Ajouter", value="add"),
-    app_commands.Choice(name="- Enlever", value="remove"),
-])
-async def winmodify(interaction: discord.Interaction, joueur: discord.Member, action: str, montant: int):
+@tree.command(name="winmodify", description="Ajoute ou enleve des victoires a un joueur dans une queue")
+@app_commands.describe(queue="Type de queue", joueur="Le joueur", action="Ajouter ou enlever", montant="Nombre de victoires")
+@app_commands.choices(
+    queue=_QUEUE_CHOICES,
+    action=[
+        app_commands.Choice(name="+ Ajouter", value="add"),
+        app_commands.Choice(name="- Enlever", value="remove"),
+    ],
+)
+async def winmodify(interaction: discord.Interaction, queue: str, joueur: discord.Member, action: str, montant: int):
     if not has_access(interaction):
         await interaction.response.send_message("Pas la permission.", ephemeral=True)
         return
@@ -537,10 +541,10 @@ async def winmodify(interaction: discord.Interaction, joueur: discord.Member, ac
         )
         return
     col = get_elo_col(interaction.guild_id)
-    get_player(col, joueur)
+    get_player(col, joueur, queue)
     delta = montant if action == "add" else -montant
     old_doc = col.find_one_and_update(
-        {"_id": str(joueur.id)},
+        {"_id": repository.player_doc_id(joueur.id, queue)},
         [{"$set": {"wins": {"$max": [0, {"$add": [{"$ifNull": ["$wins", 0]}, delta]}]}}}],
         return_document=ReturnDocument.BEFORE,
     )
@@ -549,28 +553,31 @@ async def winmodify(interaction: discord.Interaction, joueur: discord.Member, ac
     if action == "add":
         color = 0x2ecc71
         label = f"+{montant}"
-        title = "➕ Victoires ajoutées"
+        title = f"➕ Victoires {queue.upper()} ajoutées"
     else:
         color = 0xe74c3c
         label = f"-{montant}"
-        title = "➖ Victoires retirées"
+        title = f"➖ Victoires {queue.upper()} retirées"
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur",        value=joueur.mention,             inline=True)
     embed.add_field(name="Modification",  value=label,                      inline=True)
     embed.add_field(name="Nouveau total", value=f"**{new}** (etait {old})", inline=True)
     embed.set_footer(text=f"Par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
-    await _refresh_leaderboard_safe(interaction.guild)
+    await _refresh_leaderboard_safe(interaction.guild, queue)
 
 # ── /stats ─────────────────────────────────────────────────────
 
-@tree.command(name="losemodify", description="Ajoute ou enleve des defaites a un joueur")
-@app_commands.describe(joueur="Le joueur", action="Ajouter ou enlever", montant="Nombre de defaites")
-@app_commands.choices(action=[
-    app_commands.Choice(name="+ Ajouter", value="add"),
-    app_commands.Choice(name="- Enlever", value="remove"),
-])
-async def losemodify(interaction: discord.Interaction, joueur: discord.Member, action: str, montant: int):
+@tree.command(name="losemodify", description="Ajoute ou enleve des defaites a un joueur dans une queue")
+@app_commands.describe(queue="Type de queue", joueur="Le joueur", action="Ajouter ou enlever", montant="Nombre de defaites")
+@app_commands.choices(
+    queue=_QUEUE_CHOICES,
+    action=[
+        app_commands.Choice(name="+ Ajouter", value="add"),
+        app_commands.Choice(name="- Enlever", value="remove"),
+    ],
+)
+async def losemodify(interaction: discord.Interaction, queue: str, joueur: discord.Member, action: str, montant: int):
     if not has_access(interaction):
         await interaction.response.send_message("Pas la permission.", ephemeral=True)
         return
@@ -581,10 +588,10 @@ async def losemodify(interaction: discord.Interaction, joueur: discord.Member, a
         )
         return
     col = get_elo_col(interaction.guild_id)
-    get_player(col, joueur)
+    get_player(col, joueur, queue)
     delta = montant if action == "add" else -montant
     old_doc = col.find_one_and_update(
-        {"_id": str(joueur.id)},
+        {"_id": repository.player_doc_id(joueur.id, queue)},
         [{"$set": {"losses": {"$max": [0, {"$add": [{"$ifNull": ["$losses", 0]}, delta]}]}}}],
         return_document=ReturnDocument.BEFORE,
     )
@@ -593,18 +600,18 @@ async def losemodify(interaction: discord.Interaction, joueur: discord.Member, a
     if action == "add":
         color = 0xe74c3c
         label = f"+{montant}"
-        title = "➕ Défaites ajoutées"
+        title = f"➕ Défaites {queue.upper()} ajoutées"
     else:
         color = 0x2ecc71
         label = f"-{montant}"
-        title = "➖ Défaites retirées"
+        title = f"➖ Défaites {queue.upper()} retirées"
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur", value=joueur.mention, inline=True)
     embed.add_field(name="Modification", value=label, inline=True)
     embed.add_field(name="Nouveau total", value=f"**{new}** (etait {old})", inline=True)
     embed.set_footer(text=f"Par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
-    await _refresh_leaderboard_safe(interaction.guild)
+    await _refresh_leaderboard_safe(interaction.guild, queue)
 
 @tree.command(name="stats", description="Affiche les statistiques ELO d'un joueur")
 @app_commands.describe(joueur="Le joueur dont tu veux voir les stats")
