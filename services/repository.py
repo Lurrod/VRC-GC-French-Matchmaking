@@ -393,6 +393,7 @@ def create_match(
     db: Database,
     guild_id: int | str,
     *,
+    queue_type: str,
     team_a:        list[dict],
     team_b:        list[dict],
     map_name:      str,
@@ -401,12 +402,18 @@ def create_match(
     message_id:    int | None,
     channel_id:    int | None,
 ) -> Any:
-    """Insere un nouveau match. Renvoie son _id (ObjectId)."""
+    """Insere un nouveau match. Renvoie son _id (ObjectId).
+
+    `queue_type` (kw-only) : "pro" | "open" | "gc". Persiste sur le doc
+    pour permettre les filtres par type (leaderboard refresh, /reset-queue,
+    Pro Queue Henrik skip)."""
+    _check_queue_type(queue_type)
     from datetime import datetime, timezone
     doc = {
         "team_a":          team_a,
         "team_b":          team_b,
         "map":             map_name,
+        "queue_type":      queue_type,
         "lobby_leader_id": str(lobby_leader_id),
         "category_name":   category_name,
         "status":          "pending",

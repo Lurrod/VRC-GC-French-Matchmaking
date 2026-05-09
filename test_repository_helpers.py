@@ -183,3 +183,22 @@ def test_leaderboard_message_id_per_queue_type():
     clear_leaderboard_message_id(db, guild_id=42, queue_type="pro")
     assert get_leaderboard_message_id(db, guild_id=42, queue_type="pro") is None
     assert get_leaderboard_message_id(db, guild_id=42, queue_type="open") == 222
+
+
+from services.repository import create_match, get_match
+
+
+def test_create_match_persists_queue_type():
+    db = mongomock.MongoClient(tz_aware=True).db
+    match_id = create_match(
+        db, guild_id=42, queue_type="pro",
+        team_a=[{"id": "1", "name": "A", "elo": 2000}],
+        team_b=[{"id": "2", "name": "B", "elo": 2000}],
+        map_name="Ascent",
+        lobby_leader_id=1,
+        category_name="Match #1",
+        message_id=999,
+        channel_id=100,
+    )
+    doc = get_match(db, guild_id=42, match_id=match_id)
+    assert doc["queue_type"] == "pro"
