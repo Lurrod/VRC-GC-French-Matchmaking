@@ -63,7 +63,7 @@ async def test_slash_stats_unknown_player():
     guild = _fake_guild(42, members=[user])
     inter = _fake_interaction(user, guild)
 
-    await bot_module.stats.callback(inter, joueur=user)
+    await bot_module.stats.callback(inter, queue="open", joueur=user)
 
     inter.response.send_message.assert_awaited_once()
     args, kwargs = inter.response.send_message.call_args
@@ -80,10 +80,11 @@ async def test_slash_stats_known_player():
 
     col = bot_module.get_elo_col(42)
     col.insert_one({
-        "_id": "1", "name": "Alice", "elo": 200, "wins": 8, "losses": 2,
+        "_id": "1:open", "user_id": "1", "queue_type": "open",
+        "name": "Alice", "elo": 200, "wins": 8, "losses": 2,
     })
 
-    await bot_module.stats.callback(inter, joueur=user)
+    await bot_module.stats.callback(inter, queue="open", joueur=user)
 
     inter.response.send_message.assert_awaited_once()
     embed = inter.response.send_message.call_args.kwargs["embed"]
@@ -101,7 +102,7 @@ async def test_slash_win_no_permission():
     guild = _fake_guild(42, members=[user, target])
     inter = _fake_interaction(user, guild)
 
-    await bot_module.win.callback(inter, joueur1=target)
+    await bot_module.win.callback(inter, queue="open", joueur1=target)
 
     inter.response.send_message.assert_awaited_once()
     args, kwargs = inter.response.send_message.call_args
@@ -204,11 +205,12 @@ async def test_slash_leaderboard_creates_view_with_pagination():
     col = bot_module.get_elo_col(42)
     for i, m in enumerate(members):
         col.insert_one({
-            "_id": str(m.id), "name": m.display_name,
+            "_id": f"{m.id}:open", "user_id": str(m.id), "queue_type": "open",
+            "name": m.display_name,
             "elo": 100 + i, "wins": i, "losses": 0,
         })
 
-    await bot_module.leaderboard.callback(inter)
+    await bot_module.leaderboard.callback(inter, queue="open")
 
     # La 1ere page passe par interaction.followup.send (apres defer)
     inter.response.defer.assert_awaited_once()
@@ -242,12 +244,13 @@ async def test_slash_leaderboard_next_button_navigates_to_page_2():
     col = bot_module.get_elo_col(42)
     for i, m in enumerate(members):
         col.insert_one({
-            "_id": str(m.id), "name": m.display_name,
+            "_id": f"{m.id}:open", "user_id": str(m.id), "queue_type": "open",
+            "name": m.display_name,
             "elo": 100 + i, "wins": 0, "losses": 0,
         })
 
     # 1) Lance la commande pour obtenir la view
-    await bot_module.leaderboard.callback(inter)
+    await bot_module.leaderboard.callback(inter, queue="open")
     view = inter.followup.send.call_args.kwargs["view"]
     assert view.page == 0
 
@@ -283,11 +286,12 @@ async def test_slash_leaderboard_clicking_next_past_last_page_is_noop():
     col = bot_module.get_elo_col(42)
     for i, m in enumerate(members):
         col.insert_one({
-            "_id": str(m.id), "name": m.display_name,
+            "_id": f"{m.id}:open", "user_id": str(m.id), "queue_type": "open",
+            "name": m.display_name,
             "elo": 100 + i, "wins": 0, "losses": 0,
         })
 
-    await bot_module.leaderboard.callback(inter)
+    await bot_module.leaderboard.callback(inter, queue="open")
     view = inter.followup.send.call_args.kwargs["view"]
 
     # Aller en page 1 (derniere)
@@ -346,11 +350,12 @@ async def test_slash_resetelo_single_player():
     inter = _fake_interaction(admin, guild)
 
     col = bot_module.get_elo_col(42)
-    col.insert_one({"_id": "2", "name": "Bob", "elo": 999, "wins": 50, "losses": 5})
+    col.insert_one({"_id": "2:open", "user_id": "2", "queue_type": "open",
+                    "name": "Bob", "elo": 999, "wins": 50, "losses": 5})
 
-    await bot_module.resetelo.callback(inter, joueur=target, all=False)
+    await bot_module.resetelo.callback(inter, queue="open", joueur=target, all=False)
 
-    doc = col.find_one({"_id": "2"})
+    doc = col.find_one({"_id": "2:open"})
     assert doc["elo"] == 0
     assert doc["wins"] == 0
     assert doc["losses"] == 0
@@ -366,12 +371,14 @@ async def test_slash_resetelo_all_players():
 
     col = bot_module.get_elo_col(42)
     for t in targets:
-        col.insert_one({"_id": str(t.id), "name": t.display_name, "elo": 100, "wins": 5, "losses": 1})
+        col.insert_one({"_id": f"{t.id}:open", "user_id": str(t.id),
+                        "queue_type": "open", "name": t.display_name,
+                        "elo": 100, "wins": 5, "losses": 1})
 
-    await bot_module.resetelo.callback(inter, joueur=None, all=True)
+    await bot_module.resetelo.callback(inter, queue="open", joueur=None, all=True)
 
     for t in targets:
-        doc = col.find_one({"_id": str(t.id)})
+        doc = col.find_one({"_id": f"{t.id}:open"})
         assert doc["elo"] == 0
         assert doc["wins"] == 0
 

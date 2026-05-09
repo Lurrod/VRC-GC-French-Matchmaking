@@ -432,47 +432,77 @@ def _is_leaderboard_channel(interaction: discord.Interaction) -> bool:
     return "leaderboard" in name.lower()
 
 
-@tree.command(name="leaderboard", description="Affiche le classement ELO du serveur")
-async def leaderboard(interaction: discord.Interaction):
+@tree.command(name="leaderboard", description="Affiche le classement ELO d'une queue")
+@app_commands.describe(queue="Type de queue")
+@app_commands.choices(queue=_QUEUE_CHOICES)
+async def leaderboard(interaction: discord.Interaction, queue: str):
     public = _is_leaderboard_channel(interaction)
     ephemeral = not public
     await interaction.response.defer(ephemeral=ephemeral)
-    file, view = await build_leaderboard_payload(interaction.guild, db)
+    file, view = await build_leaderboard_payload(interaction.guild, db, queue)
     if file is None:
-        await interaction.followup.send("Aucun joueur enregistre.", ephemeral=True)
+        await interaction.followup.send(
+            f"Aucun joueur enregistre en {queue.upper()} Queue.",
+            ephemeral=True,
+        )
         return
     await interaction.followup.send(file=file, view=view, ephemeral=ephemeral)
 
 # ── /resetelo ──────────────────────────────────────────────────
-@tree.command(name="resetelo", description="Remet l'ELO d'un joueur a 0")
-@app_commands.describe(joueur="Le joueur a remettre a zero", all="Remettre l'ELO de TOUS les joueurs a 0")
-async def resetelo(interaction: discord.Interaction, joueur: discord.Member = None, all: bool = False):
+@tree.command(name="resetelo", description="Remet l'ELO d'un joueur (ou de tous) a 0 dans une queue")
+@app_commands.describe(
+    queue="Type de queue",
+    joueur="Le joueur a remettre a zero",
+    all="Remettre l'ELO de tous les joueurs de cette queue a 0",
+)
+@app_commands.choices(queue=_QUEUE_CHOICES)
+async def resetelo(
+    interaction: discord.Interaction,
+    queue: str,
+    joueur: discord.Member = None,
+    all: bool = False,
+):
     if not has_access(interaction):
         await interaction.response.send_message("Pas la permission.", ephemeral=True)
         return
     col = get_elo_col(interaction.guild_id)
     if all:
-        count = col.count_documents({})
-        col.update_many({}, {"$set": {"elo": 0, "wins": 0, "losses": 0}})
-        embed = discord.Embed(title="🔄 Reset général !", description=f"ELO de **{count} joueur(s)** remis a 0.", color=0xe74c3c, timestamp=datetime.now(timezone.utc))
+        count = col.count_documents({"queue_type": queue})
+        col.update_many(
+            {"queue_type": queue},
+            {"$set": {"elo": 0, "wins": 0, "losses": 0}},
+        )
+        embed = discord.Embed(
+            title=f"🔄 Reset général {queue.upper()} !",
+            description=f"ELO de **{count} joueur(s)** remis a 0 dans la queue {queue.upper()}.",
+            color=0xe74c3c,
+            timestamp=datetime.now(timezone.utc),
+        )
         embed.set_footer(text=f"Reset par {interaction.user.display_name}")
         await interaction.response.send_message(embed=embed)
-        await _refresh_leaderboard_safe(interaction.guild)
+        await _refresh_leaderboard_safe(interaction.guild, queue)
         return
     if joueur is None:
         await interaction.response.send_message("Mentionne un joueur ou utilise all:True.", ephemeral=True)
         return
-    doc = get_player(col, joueur)
+    doc = get_player(col, joueur, queue)
     old = doc["elo"]
-    col.update_one({"_id": str(joueur.id)}, {"$set": {"elo": 0, "wins": 0, "losses": 0}})
-    embed = discord.Embed(title="🔄 ELO réinitialisé !", color=0x95a5a6, timestamp=datetime.now(timezone.utc))
+    col.update_one(
+        {"_id": repository.player_doc_id(joueur.id, queue)},
+        {"$set": {"elo": 0, "wins": 0, "losses": 0}},
+    )
+    embed = discord.Embed(
+        title=f"🔄 ELO {queue.upper()} réinitialisé !",
+        color=0x95a5a6,
+        timestamp=datetime.now(timezone.utc),
+    )
     embed.add_field(name="Joueur", value=joueur.mention, inline=True)
     embed.add_field(name="Ancien ELO", value=str(old), inline=True)
     embed.add_field(name="Nouvel ELO", value="0", inline=True)
     embed.set_thumbnail(url=joueur.display_avatar.url)
     embed.set_footer(text=f"Reset par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
-    await _refresh_leaderboard_safe(interaction.guild)
+    await _refresh_leaderboard_safe(interaction.guild, queue)
 
 # ── /elomodify ─────────────────────────────────────────────────
 @tree.command(name="elomodify", description="Ajoute ou enleve de l'ELO a un joueur dans une queue")
@@ -613,32 +643,37 @@ async def losemodify(interaction: discord.Interaction, queue: str, joueur: disco
     await interaction.response.send_message(embed=embed)
     await _refresh_leaderboard_safe(interaction.guild, queue)
 
-@tree.command(name="stats", description="Affiche les statistiques ELO d'un joueur")
-@app_commands.describe(joueur="Le joueur dont tu veux voir les stats")
-async def stats(interaction: discord.Interaction, joueur: discord.Member = None):
+@tree.command(name="stats", description="Affiche les statistiques ELO d'un joueur dans une queue")
+@app_commands.describe(queue="Type de queue", joueur="Le joueur dont tu veux voir les stats")
+@app_commands.choices(queue=_QUEUE_CHOICES)
+async def stats(interaction: discord.Interaction, queue: str, joueur: discord.Member = None):
     if joueur is None:
         joueur = interaction.user
     col = get_elo_col(interaction.guild_id)
-    doc = col.find_one({"_id": str(joueur.id)})
+    doc_id = repository.player_doc_id(joueur.id, queue)
+    doc = col.find_one({"_id": doc_id})
     if not doc:
-        await interaction.response.send_message(f"{joueur.display_name} n'a pas encore joue.", ephemeral=True)
+        await interaction.response.send_message(
+            f"{joueur.display_name} n'a pas encore joue en {queue.upper()} Queue.",
+            ephemeral=True,
+        )
         return
     elo     = doc["elo"]
     wins    = doc.get("wins", 0)
     losses  = doc.get("losses", 0)
     total   = wins + losses
     winrate = round((wins / total) * 100, 1) if total > 0 else 0
-    # Rang aligne avec le tri du leaderboard (ELO desc, wins desc, _id asc)
-    # pour eviter qu'un /stats affiche un rang qui ne correspond pas a la
-    # position dans le leaderboard sur les ex-aequo.
-    rank    = col.count_documents({
+    # Rang aligne avec le tri du leaderboard de cette queue (ELO desc,
+    # wins desc, _id asc).
+    rank = col.count_documents({
+        "queue_type": queue,
         "$or": [
             {"elo": {"$gt": elo}},
             {"elo": elo, "wins": {"$gt": wins}},
-            {"elo": elo, "wins": wins, "_id": {"$lt": str(joueur.id)}},
+            {"elo": elo, "wins": wins, "_id": {"$lt": doc_id}},
         ],
     }) + 1
-    embed = discord.Embed(title=f"📊 Stats de {joueur.display_name}", color=0x3498db, timestamp=datetime.now(timezone.utc))
+    embed = discord.Embed(title=f"📊 Stats {queue.upper()} de {joueur.display_name}", color=0x3498db, timestamp=datetime.now(timezone.utc))
     embed.set_thumbnail(url=joueur.display_avatar.url)
     embed.add_field(name="🏅 ELO",       value=f"**{elo}**",            inline=True)
     embed.add_field(name="🏆 Rang",      value=f"**#{rank}**",          inline=True)
