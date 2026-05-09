@@ -523,6 +523,15 @@ class QueueCog(commands.Cog):
     async def setup_queue(
         self, interaction: discord.Interaction, queue: str,
     ) -> None:
+        expected_channel = QUEUE_CHANNEL_NAMES[queue]
+        if getattr(interaction.channel, "name", None) != expected_channel:
+            await interaction.response.send_message(
+                f"🚫 La queue **{queue.upper()}** doit etre configuree "
+                f"dans #{expected_channel}.",
+                ephemeral=True,
+            )
+            return
+
         # Reset de la queue precedente du meme type s'il y en avait une
         repository.delete_active_queue(self.db, interaction.guild_id, queue)
 
@@ -562,6 +571,28 @@ class QueueCog(commands.Cog):
     async def close_queue(
         self, interaction: discord.Interaction, queue: str,
     ) -> None:
+        # Recupere la queue active pour pouvoir supprimer le message
+        # persistant Rejoindre/Quitter dans Discord avant la purge DB.
+        queue_doc = repository.get_active_queue(
+            self.db, interaction.guild_id, queue,
+        )
+        if queue_doc is not None:
+            channel = interaction.guild.get_channel(
+                int(queue_doc["channel_id"]),
+            )
+            if channel is not None:
+                try:
+                    msg_obj = await channel.fetch_message(
+                        int(queue_doc["message_id"]),
+                    )
+                    await msg_obj.delete()
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    pass
+
         deleted = repository.delete_active_queue(
             self.db, interaction.guild_id, queue,
         )

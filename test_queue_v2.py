@@ -37,10 +37,13 @@ def _fake_guild(guild_id: int = 42, name: str = "TestGuild"):
     g.name = name
     g.roles = []
     g.voice_channels = []
+    g.get_channel = MagicMock(return_value=None)
     return g
 
 
-def _fake_interaction(user, guild_id: int = 42):
+def _fake_interaction(
+    user, guild_id: int = 42, channel_name: str = "open-queue",
+):
     inter = MagicMock()
     inter.user = user
     inter.guild = _fake_guild(guild_id)
@@ -48,6 +51,7 @@ def _fake_interaction(user, guild_id: int = 42):
     inter.channel_id = 100
     inter.channel = MagicMock()
     inter.channel.id = 100
+    inter.channel.name = channel_name
     inter.channel.guild = inter.guild
     inter.channel.send = AsyncMock(return_value=MagicMock(id=999))
     inter.channel.mention = "#general"
@@ -438,6 +442,90 @@ async def test_close_queue_when_no_queue():
 
     args, _ = inter.response.send_message.call_args
     assert "Aucune" in args[0]
+
+
+async def test_setup_queue_rejects_wrong_channel():
+    """/setup-queue open dans un salon autre que #open-queue est refuse."""
+    import bot as bot_module
+    cog = QueueCog(bot_module.bot, bot_module.db)
+    inter = _fake_interaction(
+        _fake_member(99), channel_name="general",
+    )
+
+    await cog.setup_queue.callback(cog, inter, queue="open")
+
+    inter.response.send_message.assert_awaited_once()
+    args, kwargs = inter.response.send_message.call_args
+    assert "open-queue" in args[0]
+    assert kwargs.get("ephemeral") is True
+    inter.channel.send.assert_not_awaited()
+    assert repository.get_active_queue(
+        bot_module.db, guild_id=42, queue_type="open",
+    ) is None
+
+
+async def test_setup_queue_rejects_pro_in_open_channel():
+    """/setup-queue pro dans #open-queue est refuse (par type de queue)."""
+    import bot as bot_module
+    cog = QueueCog(bot_module.bot, bot_module.db)
+    inter = _fake_interaction(
+        _fake_member(99), channel_name="open-queue",
+    )
+
+    await cog.setup_queue.callback(cog, inter, queue="pro")
+
+    args, _ = inter.response.send_message.call_args
+    assert "pro-queue" in args[0]
+    inter.channel.send.assert_not_awaited()
+
+
+async def test_close_queue_deletes_persistent_message():
+    """/close-queue supprime le message Rejoindre/Quitter dans Discord."""
+    import bot as bot_module
+    _seed_active_queue(bot_module.db)
+
+    cog = QueueCog(bot_module.bot, bot_module.db)
+    inter = _fake_interaction(_fake_member(99))
+
+    fake_msg = MagicMock()
+    fake_msg.delete = AsyncMock()
+    fake_channel = MagicMock()
+    fake_channel.fetch_message = AsyncMock(return_value=fake_msg)
+    inter.guild.get_channel = MagicMock(return_value=fake_channel)
+
+    await cog.close_queue.callback(cog, inter, queue="open")
+
+    inter.guild.get_channel.assert_called_once_with(100)
+    fake_channel.fetch_message.assert_awaited_once_with(999)
+    fake_msg.delete.assert_awaited_once()
+    assert repository.get_active_queue(
+        bot_module.db, guild_id=42, queue_type="open",
+    ) is None
+
+
+async def test_close_queue_tolerates_missing_message():
+    """Si le message a deja ete supprime cote Discord, /close-queue
+    ne plante pas et retire quand meme la queue de la DB."""
+    import discord as _discord
+    import bot as bot_module
+    _seed_active_queue(bot_module.db)
+
+    cog = QueueCog(bot_module.bot, bot_module.db)
+    inter = _fake_interaction(_fake_member(99))
+
+    fake_channel = MagicMock()
+    fake_channel.fetch_message = AsyncMock(
+        side_effect=_discord.NotFound(MagicMock(status=404), "gone"),
+    )
+    inter.guild.get_channel = MagicMock(return_value=fake_channel)
+
+    await cog.close_queue.callback(cog, inter, queue="open")
+
+    args, _ = inter.response.send_message.call_args
+    assert "supprimee" in args[0]
+    assert repository.get_active_queue(
+        bot_module.db, guild_id=42, queue_type="open",
+    ) is None
 
 
 # ── Custom IDs des boutons (pour persistance) ──────────────────────
