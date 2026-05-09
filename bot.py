@@ -515,6 +515,97 @@ async def resetelo(
     await interaction.response.send_message(embed=embed)
     await _refresh_leaderboard_safe(interaction.guild, queue)
 
+
+# ── /reset-queue ───────────────────────────────────────────────
+class _ResetQueueConfirmView(discord.ui.View):
+    """Bouton de confirmation interactif pour /reset-queue."""
+
+    def __init__(self, queue_type: str, *, timeout: float = 30):
+        super().__init__(timeout=timeout)
+        self.queue_type = queue_type
+        self.confirmed = False
+
+    @discord.ui.button(label="Confirmer le reset", style=discord.ButtonStyle.danger)
+    async def confirm(self, inter: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        for child in self.children:
+            child.disabled = True
+        await inter.response.edit_message(view=self)
+        self.stop()
+
+
+@tree.command(name="reset-queue", description="Drop toutes les donnees d'une queue (admin)")
+@app_commands.describe(queue="Type de queue a reset")
+@app_commands.choices(queue=_QUEUE_CHOICES)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def reset_queue(interaction: discord.Interaction, queue: str):
+    view = _ResetQueueConfirmView(queue_type=queue)
+    embed = discord.Embed(
+        title=f"⚠️ Reset {queue.upper()} Queue",
+        description=(
+            f"Cette action va **supprimer définitivement** :\n"
+            f"- Tous les ELO de la queue {queue.upper()}\n"
+            f"- L'historique des matchs de la queue {queue.upper()}\n"
+            f"- L'état du leaderboard de la queue {queue.upper()}\n\n"
+            f"Les autres queues ne sont pas touchées. **Confirmer ?**"
+        ),
+        color=0xe74c3c,
+    )
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await view.wait()
+    if not view.confirmed:
+        await interaction.followup.send(
+            "Reset annulé (timeout ou non-confirmé).", ephemeral=True,
+        )
+        return
+
+    # Drop des donnees pour cette queue uniquement
+    elo_col = repository.get_elo_col(db, interaction.guild_id)
+    elo_col.delete_many({"queue_type": queue})
+
+    repository.delete_active_queue(db, interaction.guild_id, queue)
+
+    matches_col = repository.get_matches_col(db, interaction.guild_id)
+    matches_col.delete_many({"queue_type": queue})
+
+    repository.clear_leaderboard_message_id(db, interaction.guild_id, queue)
+
+    # Re-poser le message de queue dans le bon salon
+    queue_cog = bot.get_cog("QueueCog")
+    target_name = QUEUE_CHANNEL_FOR_TYPE[queue]
+    target_chan = discord.utils.get(interaction.guild.text_channels, name=target_name)
+    if queue_cog and target_chan:
+        try:
+            await queue_cog.post_queue_message(target_chan, queue)
+        except Exception:
+            logger.exception("[reset-queue] re-post queue a leve")
+
+    # Refresh le leaderboard (vide → no-op)
+    await _refresh_leaderboard_safe(interaction.guild, queue)
+
+    audit = discord.Embed(
+        title=f"🔄 Queue {queue.upper()} reset",
+        description=f"Reset effectue par {interaction.user.mention}",
+        color=0x2ecc71,
+        timestamp=datetime.now(timezone.utc),
+    )
+    try:
+        await interaction.channel.send(embed=audit)
+    except Exception:
+        logger.exception("[reset-queue] audit log a leve")
+    await interaction.followup.send(
+        f"✅ Queue {queue.upper()} reset.", ephemeral=True,
+    )
+
+
+@reset_queue.error
+async def _reset_queue_perm_error(inter: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await inter.response.send_message(
+            "🚫 Réservé aux administrateurs.", ephemeral=True,
+        )
+
+
 # ── /elomodify ─────────────────────────────────────────────────
 @tree.command(name="elomodify", description="Ajoute ou enleve de l'ELO a un joueur dans une queue")
 @app_commands.describe(queue="Type de queue", joueur="Le joueur", action="Ajouter ou enlever", montant="Nombre d'ELO")
