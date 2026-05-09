@@ -27,6 +27,7 @@ def test_is_valid_queue_type():
 def test_player_doc_id():
     assert player_doc_id(123, "pro") == "123:pro"
     assert player_doc_id("456", "open") == "456:open"
+    assert player_doc_id(789, "gc") == "789:gc"
 
 
 def test_active_queue_id():
@@ -37,6 +38,13 @@ def test_active_queue_id():
 
 def test_leaderboard_state_id():
     assert leaderboard_state_id("pro") == "current:pro"
+    assert leaderboard_state_id("open") == "current:open"
+    assert leaderboard_state_id("gc") == "current:gc"
+
+
+def test_leaderboard_state_id_rejects_unknown_type():
+    with pytest.raises(ValueError, match="queue_type"):
+        leaderboard_state_id("ranked")
 
 
 def test_player_doc_id_rejects_unknown_type():
