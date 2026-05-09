@@ -137,7 +137,10 @@ tree = bot.tree
 
 # ── /setup ─────────────────────────────────────────────────────
 SETUP_CATEGORY_NAME = "🎮 Valorant 10mans"
-SETUP_CHANNELS = ["leaderboard", "queue", "matchs"]
+# 3 salons queue + 1 leaderboard partage + 1 matchs.
+SETUP_CHANNELS = ["leaderboard", "pro-queue", "open-queue", "gc-queue", "matchs"]
+# Mapping queue_type -> nom de salon ou poser le message persistant.
+QUEUE_CHANNEL_FOR_TYPE = {"pro": "pro-queue", "open": "open-queue", "gc": "gc-queue"}
 
 
 @tree.command(name="setup", description="Crée la catégorie et les salons necessaires au bot")
@@ -176,31 +179,39 @@ async def setup_bot(interaction: discord.Interaction):
         else:
             existed.append(name)
 
-    # 3) Pose le message de queue dans #queue (idempotent)
-    from cogs.queue_v2 import build_queue_embed
-    queue_chan = discord.utils.get(guild.text_channels, name="queue")
-    queue_cog  = bot.get_cog("QueueCog")
-    queue_status = ""
-    if queue_chan and queue_cog is not None:
-        repository.delete_active_queue(db, guild.id)
-        try:
-            embed = build_queue_embed(None, guild)
-            msg = await queue_chan.send(embed=embed, view=queue_cog.view)
-            repository.setup_active_queue(
-                db, guild_id=guild.id, channel_id=queue_chan.id, message_id=msg.id,
-            )
-            queue_status = f"🎯 Message de queue posté dans {queue_chan.mention}"
-        except discord.Forbidden:
-            queue_status = f"⚠️ Impossible d'envoyer dans {queue_chan.mention} (permissions)"
+    # 3) Pose le message persistant de chaque queue dans son salon dedie
+    queue_cog = bot.get_cog("QueueCog")
+    queue_status: list[str] = []
+    if queue_cog is not None:
+        for qt in repository.QUEUE_TYPES:
+            channel_name = QUEUE_CHANNEL_FOR_TYPE[qt]
+            chan = discord.utils.get(guild.text_channels, name=channel_name)
+            if chan is None:
+                queue_status.append(f"⚠️ Salon `#{channel_name}` introuvable.")
+                continue
+            repository.delete_active_queue(db, guild.id, qt)
+            try:
+                await queue_cog.post_queue_message(chan, qt)
+                queue_status.append(f"🎯 Queue {qt.upper()} posée dans {chan.mention}")
+            except discord.Forbidden:
+                queue_status.append(
+                    f"⚠️ Impossible d'envoyer dans {chan.mention} (permissions)"
+                )
 
-    # 4) Recap
+    # 4) Pre-post les 3 leaderboards (skip silencieusement si 0 joueur)
+    for qt in repository.QUEUE_TYPES:
+        try:
+            await refresh_leaderboard_channel(guild, db, bot.user.id, qt)
+        except Exception:
+            logger.exception("[setup] pre-post leaderboard %s a leve", qt)
+
+    # 5) Recap
     lines: list[str] = []
     if created:
         lines.append(f"✅ Créés : {', '.join(f'`#{c}`' for c in created)}")
     if existed:
         lines.append(f"ℹ️ Déjà présents : {', '.join(f'`#{c}`' for c in existed)}")
-    if queue_status:
-        lines.append(queue_status)
+    lines.extend(queue_status)
     if not lines:
         lines.append("✅ Setup terminé.")
     await interaction.followup.send("\n".join(lines), ephemeral=True)
