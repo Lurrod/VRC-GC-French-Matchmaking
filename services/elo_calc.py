@@ -6,7 +6,7 @@ from typing import Final
 
 
 # ── Constantes ────────────────────────────────────────────────────
-ELO_START: Final[int] = 0
+ELO_START: Final[int] = 2000
 MAPS:      Final[tuple[str, ...]] = (
     "Breeze", "Ascent", "Lotus", "Fracture", "Split", "Haven", "Pearl",
 )
