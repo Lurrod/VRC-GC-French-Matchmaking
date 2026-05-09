@@ -84,3 +84,81 @@ def test_get_or_create_player_isolates_queue_types():
     docs = list(col.find())
     assert len(docs) == 2
     assert {d["_id"] for d in docs} == {"1:pro", "1:open"}
+
+
+from services.repository import (
+    setup_active_queue,
+    get_active_queue,
+    delete_active_queue,
+    add_player_to_queue,
+    remove_player_from_queue,
+    close_active_queue,
+    find_player_in_any_queue,
+)
+
+
+def test_setup_and_get_active_queue_per_type():
+    db = mongomock.MongoClient(tz_aware=True).db
+    setup_active_queue(db, guild_id=42, queue_type="pro",
+                        channel_id=100, message_id=999)
+    setup_active_queue(db, guild_id=42, queue_type="open",
+                        channel_id=200, message_id=888)
+
+    pro = get_active_queue(db, guild_id=42, queue_type="pro")
+    open_q = get_active_queue(db, guild_id=42, queue_type="open")
+    gc = get_active_queue(db, guild_id=42, queue_type="gc")
+
+    assert pro["_id"] == "active:pro"
+    assert pro["channel_id"] == 100
+    assert pro["queue_type"] == "pro"
+    assert open_q["_id"] == "active:open"
+    assert open_q["channel_id"] == 200
+    assert gc is None
+
+
+def test_add_remove_player_per_type():
+    db = mongomock.MongoClient(tz_aware=True).db
+    setup_active_queue(db, guild_id=42, queue_type="pro",
+                        channel_id=100, message_id=999)
+
+    res = add_player_to_queue(db, guild_id=42, queue_type="pro", user_id=1)
+    assert res.success
+    assert res.queue["players"] == ["1"]
+    assert res.queue["queue_type"] == "pro"
+
+    res = remove_player_from_queue(db, guild_id=42, queue_type="pro", user_id=1)
+    assert res.success
+    assert res.queue["players"] == []
+
+
+def test_find_player_in_any_queue():
+    db = mongomock.MongoClient(tz_aware=True).db
+    setup_active_queue(db, guild_id=42, queue_type="pro",
+                        channel_id=100, message_id=999)
+    setup_active_queue(db, guild_id=42, queue_type="open",
+                        channel_id=200, message_id=888)
+    add_player_to_queue(db, guild_id=42, queue_type="pro", user_id=1)
+
+    assert find_player_in_any_queue(db, guild_id=42, user_id=1) == "pro"
+    assert find_player_in_any_queue(db, guild_id=42, user_id=2) is None
+
+
+def test_delete_active_queue_per_type():
+    db = mongomock.MongoClient(tz_aware=True).db
+    setup_active_queue(db, guild_id=42, queue_type="pro",
+                        channel_id=100, message_id=999)
+    setup_active_queue(db, guild_id=42, queue_type="open",
+                        channel_id=200, message_id=888)
+
+    assert delete_active_queue(db, guild_id=42, queue_type="pro") is True
+    assert get_active_queue(db, guild_id=42, queue_type="pro") is None
+    assert get_active_queue(db, guild_id=42, queue_type="open") is not None
+
+
+def test_close_active_queue_per_type():
+    db = mongomock.MongoClient(tz_aware=True).db
+    setup_active_queue(db, guild_id=42, queue_type="pro",
+                        channel_id=100, message_id=999)
+    close_active_queue(db, guild_id=42, queue_type="pro")
+    pro = get_active_queue(db, guild_id=42, queue_type="pro")
+    assert pro["status"] == "forming"

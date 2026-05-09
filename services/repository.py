@@ -255,40 +255,46 @@ def get_queue_col(db: Database, guild_id: int | str) -> Collection:
     return db[f"queue_{guild_id}"]
 
 
-def get_active_queue(db: Database, guild_id: int | str) -> Mapping[str, Any] | None:
-    return get_queue_col(db, guild_id).find_one({"_id": "active"})
+def get_active_queue(db: Database, guild_id: int | str, queue_type: str) -> Mapping[str, Any] | None:
+    _check_queue_type(queue_type)
+    return get_queue_col(db, guild_id).find_one({"_id": active_queue_id(queue_type)})
 
 
 def setup_active_queue(
     db: Database,
     guild_id: int | str,
+    queue_type: str,
     channel_id: int,
     message_id: int,
 ) -> None:
-    """Cree (ou remplace) la queue active pour ce guild."""
+    """Cree (ou remplace) la queue active de ce type pour ce guild."""
+    _check_queue_type(queue_type)
     from datetime import datetime, timezone
     get_queue_col(db, guild_id).update_one(
-        {"_id": "active"},
+        {"_id": active_queue_id(queue_type)},
         {"$set": {
             "channel_id": int(channel_id),
             "message_id": int(message_id),
             "players":    [],
             "status":     "open",
+            "queue_type": queue_type,
             "created_at": datetime.now(timezone.utc),
         }},
         upsert=True,
     )
 
 
-def delete_active_queue(db: Database, guild_id: int | str) -> bool:
-    res = get_queue_col(db, guild_id).delete_one({"_id": "active"})
+def delete_active_queue(db: Database, guild_id: int | str, queue_type: str) -> bool:
+    _check_queue_type(queue_type)
+    res = get_queue_col(db, guild_id).delete_one({"_id": active_queue_id(queue_type)})
     return res.deleted_count > 0
 
 
-def close_active_queue(db: Database, guild_id: int | str) -> None:
-    """Marque la queue comme 'forming' (match en cours de formation)."""
+def close_active_queue(db: Database, guild_id: int | str, queue_type: str) -> None:
+    """Marque la queue de ce type comme 'forming'."""
+    _check_queue_type(queue_type)
     get_queue_col(db, guild_id).update_one(
-        {"_id": "active"},
+        {"_id": active_queue_id(queue_type)},
         {"$set": {"status": "forming"}},
     )
 
@@ -303,12 +309,15 @@ class QueueResult:
 def add_player_to_queue(
     db: Database,
     guild_id: int | str,
+    queue_type: str,
     user_id:  int | str,
     *,
     max_size: int = QUEUE_SIZE_DEFAULT,
 ) -> QueueResult:
+    _check_queue_type(queue_type)
     col = get_queue_col(db, guild_id)
-    queue = col.find_one({"_id": "active"})
+    qid = active_queue_id(queue_type)
+    queue = col.find_one({"_id": qid})
     if not queue:
         return QueueResult(False, "no_queue", None)
     if queue.get("status") != "open":
@@ -319,21 +328,15 @@ def add_player_to_queue(
         return QueueResult(False, "already_in", queue)
     if len(players) >= max_size:
         return QueueResult(False, "queue_full", queue)
-
-    # Contrainte de taille atomique : empeche 2 ajouts concurrents (ou 2
-    # instances bot en parallele) de depasser max_size meme si la pre-check
-    # plus haut a passe pour les deux. Permet le scaling multi-instance.
     updated = col.find_one_and_update(
         {
-            "_id": "active",
+            "_id": qid,
             "status": "open",
             "players": {"$nin": [uid_str]},
-            "$expr": {
-                "$lt": [
-                    {"$size": {"$ifNull": ["$players", []]}},
-                    max_size,
-                ],
-            },
+            "$expr": {"$lt": [
+                {"$size": {"$ifNull": ["$players", []]}},
+                max_size,
+            ]},
         },
         {"$push": {"players": uid_str}},
         return_document=ReturnDocument.AFTER,
@@ -346,22 +349,37 @@ def add_player_to_queue(
 def remove_player_from_queue(
     db: Database,
     guild_id: int | str,
+    queue_type: str,
     user_id:  int | str,
 ) -> QueueResult:
+    _check_queue_type(queue_type)
     col = get_queue_col(db, guild_id)
-    queue = col.find_one({"_id": "active"})
+    qid = active_queue_id(queue_type)
+    queue = col.find_one({"_id": qid})
     if not queue:
         return QueueResult(False, "no_queue", None)
     uid_str = str(user_id)
     if uid_str not in queue.get("players", []):
         return QueueResult(False, "not_in", queue)
-
     updated = col.find_one_and_update(
-        {"_id": "active"},
+        {"_id": qid},
         {"$pull": {"players": uid_str}},
         return_document=ReturnDocument.AFTER,
     )
     return QueueResult(True, "removed", updated)
+
+
+def find_player_in_any_queue(
+    db: Database, guild_id: int | str, user_id: int | str,
+) -> str | None:
+    """Renvoie le queue_type ou le user est present, ou None."""
+    uid_str = str(user_id)
+    col = get_queue_col(db, guild_id)
+    for qt in QUEUE_TYPES:
+        doc = col.find_one({"_id": active_queue_id(qt), "players": uid_str})
+        if doc is not None:
+            return qt
+    return None
 
 
 # ── V2 : matches ──────────────────────────────────────────────────
