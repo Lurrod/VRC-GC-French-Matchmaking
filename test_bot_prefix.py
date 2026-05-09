@@ -111,9 +111,9 @@ async def test_win_grants_elo_with_admin(discord_bot, fake_guild):
 
     await dpytest.message(f"!win {target.mention}")
 
-    # Verifier en base
+    # Verifier en base — le prefix !win s'applique sur la queue open par defaut
     col = bot_module.get_elo_col(fake_guild.id)
-    doc = col.find_one({"_id": str(target.id)})
+    doc = col.find_one({"_id": f"{target.id}:open"})
     assert doc is not None, "Le joueur n'a pas ete cree en base"
     # Pondération par position : slot 0 (joueur1) gagne +20.
     assert doc["elo"] == 2020, f"ELO attendu 2020, recu {doc['elo']}"
@@ -133,12 +133,16 @@ async def test_lose_floors_elo_at_zero(discord_bot, fake_guild):
     await admin.add_roles(admin_role)
 
     col = bot_module.get_elo_col(fake_guild.id)
-    col.insert_one({"_id": str(target.id),  "name": target.display_name,  "elo": 5,    "wins": 0, "losses": 0})
-    col.insert_one({"_id": str(partner.id), "name": partner.display_name, "elo": 2995, "wins": 0, "losses": 0})
+    col.insert_one({"_id": f"{target.id}:open", "user_id": str(target.id),
+                    "queue_type": "open", "name": target.display_name,
+                    "elo": 5,    "wins": 0, "losses": 0})
+    col.insert_one({"_id": f"{partner.id}:open", "user_id": str(partner.id),
+                    "queue_type": "open", "name": partner.display_name,
+                    "elo": 2995, "wins": 0, "losses": 0})
 
     # /lose pondéré par position : slot 0 (target) -> loss=10 -> max(0, 5-10) = 0
     await dpytest.message(f"!lose {target.mention} {partner.mention}")
 
-    doc = col.find_one({"_id": str(target.id)})
+    doc = col.find_one({"_id": f"{target.id}:open"})
     assert doc["elo"] == 0, f"ELO doit etre clampe a 0, recu {doc['elo']}"
     assert doc["losses"] == 1

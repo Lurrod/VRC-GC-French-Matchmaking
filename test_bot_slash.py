@@ -120,6 +120,7 @@ async def test_slash_win_5_players_distributes_elo_v2():
 
     await bot_module.win.callback(
         inter,
+        queue="open",
         joueur1=targets[0], joueur2=targets[1], joueur3=targets[2],
         joueur4=targets[3], joueur5=targets[4],
     )
@@ -127,7 +128,7 @@ async def test_slash_win_5_players_distributes_elo_v2():
     expected_gains = bot_module.WIN_DELTAS_BY_SLOT  # (20, 18, 17, 16, 15)
     col = bot_module.get_elo_col(42)
     for slot, t in enumerate(targets):
-        doc = col.find_one({"_id": str(t.id)})
+        doc = col.find_one({"_id": f"{t.id}:open"})
         gain = expected_gains[slot]
         expected_elo = 2000 + gain
         assert doc["elo"] == expected_elo, f"{t.display_name}: attendu {expected_elo}, recu {doc['elo']}"
@@ -147,15 +148,16 @@ async def test_slash_win_base_is_constant_regardless_of_avg():
     col = bot_module.get_elo_col(42)
     for t in targets:
         col.insert_one({
-            "_id": str(t.id), "name": t.display_name,
-            "elo": 3000, "wins": 0, "losses": 0, "linked_once": True,
+            "_id": f"{t.id}:open", "user_id": str(t.id), "queue_type": "open",
+            "name": t.display_name,
+            "elo": 3000, "wins": 0, "losses": 0,
         })
 
-    await bot_module.win.callback(inter, joueur1=targets[0], joueur2=targets[1])
+    await bot_module.win.callback(inter, queue="open", joueur1=targets[0], joueur2=targets[1])
 
     expected_gains = bot_module.WIN_DELTAS_BY_SLOT  # slot 0: +20, slot 1: +18
     for slot, t in enumerate(targets):
-        doc = col.find_one({"_id": str(t.id)})
+        doc = col.find_one({"_id": f"{t.id}:open"})
         expected = 3000 + expected_gains[slot]
         assert doc["elo"] == expected, f"{t.display_name}: attendu {expected}, recu {doc['elo']}"
 
@@ -171,17 +173,19 @@ async def test_slash_lose_floors_at_zero():
     inter = _fake_interaction(admin, guild)
 
     col = bot_module.get_elo_col(42)
-    col.insert_one({"_id": "2", "name": "Bob",   "elo": 5,    "wins": 0, "losses": 0})
-    col.insert_one({"_id": "3", "name": "Boost", "elo": 2995, "wins": 0, "losses": 0})
+    col.insert_one({"_id": "2:open", "user_id": "2", "queue_type": "open",
+                    "name": "Bob",   "elo": 5,    "wins": 0, "losses": 0})
+    col.insert_one({"_id": "3:open", "user_id": "3", "queue_type": "open",
+                    "name": "Boost", "elo": 2995, "wins": 0, "losses": 0})
 
     # /lose pondéré par position : slot 0 -> -10, slot 1 -> -10
     # Bob (slot 0)  : max(0, 5 - 10)    = 0
     # Boost (slot 1): 2995 - 10         = 2985
-    await bot_module.lose.callback(inter, joueur1=target, joueur2=partner)
+    await bot_module.lose.callback(inter, queue="open", joueur1=target, joueur2=partner)
 
     losses = bot_module.LOSE_DELTAS_BY_SLOT
-    assert col.find_one({"_id": "2"})["elo"] == max(0, 5 - losses[0])
-    assert col.find_one({"_id": "3"})["elo"] == 2995 - losses[1]
+    assert col.find_one({"_id": "2:open"})["elo"] == max(0, 5 - losses[0])
+    assert col.find_one({"_id": "3:open"})["elo"] == 2995 - losses[1]
 
 
 # ── /leaderboard + LeaderboardView (le bug initial) ───────────────

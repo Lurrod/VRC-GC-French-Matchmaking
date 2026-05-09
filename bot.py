@@ -100,10 +100,18 @@ def _try_acquire_candidature_cooldown(uid: str) -> tuple[bool, float]:
         return True, 0.0
     return False, remaining
 
-def get_player(col, member: discord.Member):
+def get_player(col, member: discord.Member, queue_type: str):
     return repository.get_or_create_player(
-        col, member.id, member.display_name, initial_elo=ELO_START,
+        col, member.id, queue_type, member.display_name, initial_elo=ELO_START,
     )
+
+
+# Choix slash commun a toutes les commandes ELO/leaderboard.
+_QUEUE_CHOICES = [
+    app_commands.Choice(name="Pro", value="pro"),
+    app_commands.Choice(name="Open", value="open"),
+    app_commands.Choice(name="GC", value="gc"),
+]
 
 def get_bypass_role(guild_id):
     return repository.get_bypass_role(db, guild_id)
@@ -234,33 +242,41 @@ async def bypass(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ── Helper V2 : ELO serveur avec fallback ──────────────────────
-def _match_elo_for_member(guild_id: int, user_id: int) -> int:
-    """Renvoie l'ELO serveur du joueur (elo_<guild>.elo), ou ELO_REFERENCE si absente."""
-    doc = repository.get_elo_col(db, guild_id).find_one({"_id": str(user_id)})
+def _match_elo_for_member(guild_id: int, user_id: int, queue_type: str) -> int:
+    """Renvoie l'ELO serveur du joueur dans la queue donnee (elo_<guild>.elo),
+    ou ELO_REFERENCE si absente."""
+    doc = repository.get_elo_col(db, guild_id).find_one(
+        {"_id": repository.player_doc_id(user_id, queue_type)}
+    )
     if doc and doc.get("elo") is not None:
         return int(doc["elo"])
     return elo_calc.ELO_REFERENCE
 
 
-def _compute_match_change_for_members(guild_id: int, members: list) -> tuple[int, int, int]:
-    """Renvoie (avg_elo, gain, loss) pour la liste de joueurs passee."""
-    elos = [_match_elo_for_member(guild_id, m.id) for m in members]
+def _compute_match_change_for_members(
+    guild_id: int, members: list, queue_type: str,
+) -> tuple[int, int, int]:
+    """Renvoie (avg_elo, gain, loss) pour la liste de joueurs dans la queue."""
+    elos = [_match_elo_for_member(guild_id, m.id, queue_type) for m in members]
     avg  = round(sum(elos) / len(elos)) if elos else elo_calc.ELO_REFERENCE
     gain, loss = elo_calc.compute_match_elo_change(avg)
     return avg, gain, loss
 
 
 # ── /win ───────────────────────────────────────────────────────
-@tree.command(name="win", description="Enregistre une victoire (gain V2 proportionnel a la moyenne d'ELO)")
+@tree.command(name="win", description="Enregistre une victoire dans une queue (Pro=flat 16, autres=pondere)")
 @app_commands.describe(
+    queue="Type de queue",
     joueur1="Joueur gagnant 1",
     joueur2="Joueur gagnant 2",
     joueur3="Joueur gagnant 3",
     joueur4="Joueur gagnant 4",
     joueur5="Joueur gagnant 5",
 )
+@app_commands.choices(queue=_QUEUE_CHOICES)
 async def win(
     interaction: discord.Interaction,
+    queue: str,
     joueur1: discord.Member,
     joueur2: discord.Member = None,
     joueur3: discord.Member = None,
@@ -273,19 +289,27 @@ async def win(
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(interaction.guild_id)
 
-    avg_elo, _, _ = _compute_match_change_for_members(interaction.guild_id, players)
+    if queue == "pro":
+        deltas = [16] * len(players)
+        desc = "Pro Queue : +16 a plat pour chaque gagnant."
+    else:
+        deltas = list(WIN_DELTAS_BY_SLOT)[:len(players)]
+        avg_elo, _, _ = _compute_match_change_for_members(
+            interaction.guild_id, players, queue,
+        )
+        desc = f"Avg ELO du groupe : **{avg_elo}** -> gains ponderes par position."
 
     embed = discord.Embed(
-        title="Resultats - Victoire enregistree !",
-        description=f"Avg ELO du groupe : **{avg_elo}** -> gains pondérés par position (joueur1→joueur5)",
+        title=f"Resultats {queue.upper()} - Victoire enregistree !",
+        description=desc,
         color=0x2ecc71,
         timestamp=datetime.now(timezone.utc),
     )
     for slot, member in enumerate(players):
-        gain = WIN_DELTAS_BY_SLOT[slot]
-        get_player(col, member)
+        gain = deltas[slot]
+        get_player(col, member, queue)
         old_doc = col.find_one_and_update(
-            {"_id": str(member.id)},
+            {"_id": repository.player_doc_id(member.id, queue)},
             {"$inc": {"elo": gain, "wins": 1}},
             return_document=ReturnDocument.BEFORE,
         )
@@ -293,23 +317,27 @@ async def win(
         new = old + gain
         embed.add_field(
             name=member.display_name,
-            value=f"+{gain} ELO -> **{new}** *(était {old})*",
+            value=f"+{gain} ELO -> **{new}** *(etait {old})*",
             inline=False,
         )
     embed.set_footer(text=f"Enregistre par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
+    await _refresh_leaderboard_safe(interaction.guild, queue)
 
 # ── /lose ──────────────────────────────────────────────────────
-@tree.command(name="lose", description="Enregistre une defaite (perte V2 proportionnelle a la moyenne d'ELO)")
+@tree.command(name="lose", description="Enregistre une defaite dans une queue (Pro=flat 16, autres=pondere)")
 @app_commands.describe(
+    queue="Type de queue",
     joueur1="Joueur perdant 1",
     joueur2="Joueur perdant 2",
     joueur3="Joueur perdant 3",
     joueur4="Joueur perdant 4",
     joueur5="Joueur perdant 5",
 )
+@app_commands.choices(queue=_QUEUE_CHOICES)
 async def lose(
     interaction: discord.Interaction,
+    queue: str,
     joueur1: discord.Member,
     joueur2: discord.Member = None,
     joueur3: discord.Member = None,
@@ -322,19 +350,27 @@ async def lose(
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(interaction.guild_id)
 
-    avg_elo, _, _ = _compute_match_change_for_members(interaction.guild_id, players)
+    if queue == "pro":
+        deltas = [16] * len(players)
+        desc = "Pro Queue : -16 a plat pour chaque perdant."
+    else:
+        deltas = list(LOSE_DELTAS_BY_SLOT)[:len(players)]
+        avg_elo, _, _ = _compute_match_change_for_members(
+            interaction.guild_id, players, queue,
+        )
+        desc = f"Avg ELO du groupe : **{avg_elo}** -> pertes ponderees par position."
 
     embed = discord.Embed(
-        title="Resultats - Defaite enregistree !",
-        description=f"Avg ELO du groupe : **{avg_elo}** -> pertes pondérées par position (joueur1→joueur5)",
+        title=f"Resultats {queue.upper()} - Defaite enregistree !",
+        description=desc,
         color=0xe74c3c,
         timestamp=datetime.now(timezone.utc),
     )
     for slot, member in enumerate(players):
-        loss = LOSE_DELTAS_BY_SLOT[slot]
-        get_player(col, member)
+        loss = deltas[slot]
+        get_player(col, member, queue)
         old_doc = col.find_one_and_update(
-            {"_id": str(member.id)},
+            {"_id": repository.player_doc_id(member.id, queue)},
             [{"$set": {
                 "elo": {"$max": [0, {"$subtract": [{"$ifNull": ["$elo", 0]}, loss]}]},
                 "losses": {"$add": [{"$ifNull": ["$losses", 0]}, 1]},
@@ -350,6 +386,7 @@ async def lose(
         )
     embed.set_footer(text=f"Enregistre par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
+    await _refresh_leaderboard_safe(interaction.guild, queue)
 
 # ── /kd ────────────────────────────────────────────────────────
 # ── /map ───────────────────────────────────────────────────────
@@ -372,15 +409,19 @@ async def coinflip(interaction: discord.Interaction):
 
 
 # ── Refresh leaderboard helper ─────────────────────────────────
-async def _refresh_leaderboard_safe(guild: discord.Guild | None) -> None:
-    """Rafraichit le leaderboard du salon `#leaderboard` apres une
-    modification d'ELO. Silencieux si le bot n'est pas pret ou si la guild
-    n'a pas de salon dedie."""
+async def _refresh_leaderboard_safe(
+    guild: discord.Guild | None, queue_type: str,
+) -> None:
+    """Rafraichit le leaderboard de la queue donnee dans `#leaderboard`.
+
+    Silencieux si le bot n'est pas pret ou si la guild n'a pas de salon
+    dedie. Le `queue_type` cible le bon des 3 leaderboards qui cohabitent
+    dans #leaderboard (un par queue type)."""
     if guild is None or bot.user is None:
         return
     try:
-        await refresh_leaderboard_channel(guild, db, bot.user.id)
-    except Exception as e:
+        await refresh_leaderboard_channel(guild, db, bot.user.id, queue_type)
+    except Exception:
         logger.exception("[leaderboard] refresh a leve")
 
 
@@ -714,27 +755,30 @@ async def stats_prefix(ctx, member: discord.Member = None):
 
 @bot.command(name="win")
 async def win_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = None, joueur3: discord.Member = None, joueur4: discord.Member = None, joueur5: discord.Member = None):
+    """Prefix legacy : applique sur la queue Open par defaut (pour les
+    admins qui utilisent encore !win sans choisir de queue)."""
     if not ctx.author.guild_permissions.manage_guild:
         role_id = get_bypass_role(ctx.guild.id)
         if not role_id or not any(r.id == role_id for r in ctx.author.roles):
             await ctx.send("Pas la permission.")
             return
+    queue = "open"
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(ctx.guild.id)
 
-    avg_elo, _, _ = _compute_match_change_for_members(ctx.guild.id, players)
+    avg_elo, _, _ = _compute_match_change_for_members(ctx.guild.id, players, queue)
 
     embed = discord.Embed(
-        title="🏆 Résultats — Victoire enregistrée !",
+        title="🏆 Résultats Open — Victoire enregistrée !",
         description=f"Avg ELO du groupe : **{avg_elo}** -> gains pondérés par position (joueur1→joueur5)",
         color=0x2ecc71,
         timestamp=datetime.now(timezone.utc),
     )
     for slot, member in enumerate(players):
         gain = WIN_DELTAS_BY_SLOT[slot]
-        get_player(col, member)
+        get_player(col, member, queue)
         old_doc = col.find_one_and_update(
-            {"_id": str(member.id)},
+            {"_id": repository.player_doc_id(member.id, queue)},
             {"$inc": {"elo": gain, "wins": 1}},
             return_document=ReturnDocument.BEFORE,
         )
@@ -743,19 +787,21 @@ async def win_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = Non
         embed.add_field(name=member.display_name, value=f"+{gain} ELO -> **{new}**", inline=False)
     embed.set_footer(text=f"Enregistre par {ctx.author.display_name}")
     await ctx.send(embed=embed)
-    await _refresh_leaderboard_safe(ctx.guild)
+    await _refresh_leaderboard_safe(ctx.guild, queue)
 
 @bot.command(name="lose")
 async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = None, joueur3: discord.Member = None, joueur4: discord.Member = None, joueur5: discord.Member = None):
+    """Prefix legacy : applique sur la queue Open par defaut."""
     if not ctx.author.guild_permissions.manage_guild:
         role_id = get_bypass_role(ctx.guild.id)
         if not role_id or not any(r.id == role_id for r in ctx.author.roles):
             await ctx.send("Pas la permission.")
             return
+    queue = "open"
     players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
     col = get_elo_col(ctx.guild.id)
 
-    avg_elo, _, _ = _compute_match_change_for_members(ctx.guild.id, players)
+    avg_elo, _, _ = _compute_match_change_for_members(ctx.guild.id, players, queue)
 
     embed = discord.Embed(
         title="💀 Résultats — Défaite enregistrée !",
@@ -765,9 +811,9 @@ async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = No
     )
     for slot, member in enumerate(players):
         loss = LOSE_DELTAS_BY_SLOT[slot]
-        get_player(col, member)
+        get_player(col, member, queue)
         old_doc = col.find_one_and_update(
-            {"_id": str(member.id)},
+            {"_id": repository.player_doc_id(member.id, queue)},
             [{"$set": {
                 "elo": {"$max": [0, {"$subtract": [{"$ifNull": ["$elo", 0]}, loss]}]},
                 "losses": {"$add": [{"$ifNull": ["$losses", 0]}, 1]},
@@ -779,7 +825,7 @@ async def lose_prefix(ctx, joueur1: discord.Member, joueur2: discord.Member = No
         embed.add_field(name=member.display_name, value=f"-{loss} ELO -> **{new}**", inline=False)
     embed.set_footer(text=f"Enregistre par {ctx.author.display_name}")
     await ctx.send(embed=embed)
-    await _refresh_leaderboard_safe(ctx.guild)
+    await _refresh_leaderboard_safe(ctx.guild, queue)
 
 @bot.command(name="map")
 async def map_prefix(ctx):
