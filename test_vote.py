@@ -61,6 +61,7 @@ def _seed_match(db, guild_id: int = 42, message_id: int = 555,
         category_name="Match #1",
         message_id=message_id,
         channel_id=100,
+        queue_type="open",
     )
 
 
@@ -494,6 +495,7 @@ def _seed_match_with_avg_2400(db, guild_id: int = 42, message_id: int = 555):
         category_name="Match #1",
         message_id=message_id,
         channel_id=100,
+        queue_type="open",
     )
 
 
@@ -591,6 +593,7 @@ async def test_validation_with_high_elo_match_bigger_gain():
         category_name="Match #1",
         message_id=555,
         channel_id=100,
+        queue_type="open",
     )
     _seed_db_elos(bot_module.db)
 
