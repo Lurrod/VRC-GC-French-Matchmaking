@@ -55,28 +55,19 @@ def apply_match_validation(
     multipliers: dict[str, float] | None = None,
 ) -> MatchEloOutcome:
     """
-    Distribue les ELO en une seule passe, **zero-sum strict** :
-    sum(deltas_gagnants) + sum(deltas_perdants) == 0, plancher a 0 ELO inclus.
+    Distribue les ELO en une seule passe, **zero-sum strict**.
 
-    Le total d'une equipe est `n * base_change`. Les multiplicateurs
-    redistribuent ce total au sein de l'equipe :
-      - gagnant : poids = mult           (mult eleve -> plus gros gain)
-      - perdant : poids = (2 - mult)     (mult eleve -> plus faible perte)
-    Le total par equipe est donc preserve quoi qu'il arrive aux multiplicateurs
-    individuels.
-
-    Si un joueur est absent du dict, mult=1.0 (poids = 1).
-    Si `multipliers` est None, distribution plate (chacun base_change).
+    Pro Queue (queue_type == "pro") : court-circuit. Multipliers ignores,
+    +16 a plat pour les gagnants, -16 a plat pour les perdants. Le flow
+    Henrik n'est pas appele en amont pour ces matchs (cf. cogs/match.py).
 
     Plancher a 0 : si un perdant a moins d'ELO que la perte calculee, son
-    delta est clamp a -old_elo (ne descend pas sous 0). La portion non-
-    perdable est retiree des gains gagnants pour preserver le zero-sum
-    et eviter une injection nette d'ELO dans le systeme.
+    delta est clamp a -old_elo (ne descend pas sous 0).
 
     Args:
         db:          Database mongomock/pymongo
         guild_id:    guild Discord
-        match_doc:   doc match avec `team_a`, `team_b`, `status` validated_a/b
+        match_doc:   doc match avec `team_a`, `team_b`, `status`, `queue_type`
         multipliers: dict user_id (str) -> multiplicateur ACS (~0.7..1.3)
 
     Raises:
@@ -86,63 +77,62 @@ def apply_match_validation(
     if status not in (VALIDATED_A, VALIDATED_B):
         raise ValueError(f"Match non valide : status={status}")
 
+    queue_type = match_doc.get("queue_type", "open")
+
     if status == VALIDATED_A:
         winners, losers = match_doc["team_a"], match_doc["team_b"]
     else:
         winners, losers = match_doc["team_b"], match_doc["team_a"]
 
     avg_elo = elo_calc.compute_team_avg_elo(winners + losers)
-    if multipliers is None:
-        # Pas de donnees Henrik : on applique +16/-16 a plat. La valeur
-        # proportionnelle (`compute_match_elo_change`) ne sert plus
-        # qu'au cas pondere ACS, ou l'avg du match a un sens (les
-        # multiplicateurs distribuent le total).
-        base_gain = FLAT_FALLBACK_ELO_CHANGE
-        base_loss = FLAT_FALLBACK_ELO_CHANGE
+
+    if queue_type == "pro":
+        # Pro Queue : flat 16, multipliers ignores.
+        base_gain = base_loss = FLAT_FALLBACK_ELO_CHANGE
+        mults = {}
+        weighted = False
+    elif multipliers is None:
+        base_gain = base_loss = FLAT_FALLBACK_ELO_CHANGE
+        mults = {}
+        weighted = False
     else:
         base_gain, base_loss = elo_calc.compute_match_elo_change(avg_elo)
+        mults = multipliers
+        weighted = True
 
-    mults    = multipliers or {}
-    weighted = multipliers is not None
-    elo_col  = repository.get_elo_col(db, guild_id)
+    elo_col = repository.get_elo_col(db, guild_id)
 
     winner_mults = [float(mults.get(str(p["id"]), 1.0)) for p in winners]
     loser_mults  = [float(mults.get(str(p["id"]), 1.0)) for p in losers]
 
-    # Distribution per-joueur ancree sur le multiplicateur :
-    #   gagnant : delta = +base * mult        (mult=1.0 -> +base pile)
-    #   perdant : delta = -base * (2 - mult)  (mult=1.0 -> -base pile)
-    # Le "joueur du milieu" (perf = moyenne d'equipe -> mult=1.0) recoit
-    # exactement base, quel que soit le scaling des coequipiers.
-    # Quand sum(mults) ≈ n par equipe (cas non-clamp), zero-sum tient
-    # encore naturellement ; sinon une legere inflation/deflation est
-    # acceptee comme prix de l'ancrage.
-    winner_deltas = [
-        int(round(+base_gain * m)) for m in winner_mults
-    ]
-    loser_deltas = [
-        int(round(-base_loss * (2.0 - m))) for m in loser_mults
-    ]
+    winner_deltas = [int(round(+base_gain * m)) for m in winner_mults]
+    loser_deltas  = [int(round(-base_loss * (2.0 - m))) for m in loser_mults]
 
-    # Clamp a 0 pour les perdants : on ne descend jamais sous 0 ELO.
+    # Clamp a 0 ELO pour les perdants (compound _id pour le lookup).
     loser_old_elos: list[int] = []
     for p in losers:
-        doc = elo_col.find_one({"_id": str(p["id"])})
+        doc = elo_col.find_one(
+            {"_id": repository.player_doc_id(p["id"], queue_type)}
+        )
         loser_old_elos.append(
             int(doc.get("elo", elo_calc.ELO_START)) if doc else elo_calc.ELO_START
         )
-    clamped_loser_deltas: list[int] = []
-    for old_elo, delta in zip(loser_old_elos, loser_deltas):
-        # delta est negatif. La perte maximale possible est -old_elo.
-        max_loss_delta = -old_elo
-        clamped_loser_deltas.append(max(max_loss_delta, delta))
+    clamped_loser_deltas = [
+        max(-old, delta) for old, delta in zip(loser_old_elos, loser_deltas)
+    ]
 
     match_id = match_doc.get("_id")
     changes: list[PlayerEloChange] = []
     for p, delta, mult in zip(winners, winner_deltas, winner_mults):
-        changes.append(_apply_player(elo_col, p, match_id=match_id, delta=delta, win=True, multiplier=mult))
+        changes.append(_apply_player(
+            elo_col, p, queue_type=queue_type, match_id=match_id,
+            delta=delta, win=True, multiplier=mult,
+        ))
     for p, delta, mult in zip(losers, clamped_loser_deltas, loser_mults):
-        changes.append(_apply_player(elo_col, p, match_id=match_id, delta=delta, win=False, multiplier=mult))
+        changes.append(_apply_player(
+            elo_col, p, queue_type=queue_type, match_id=match_id,
+            delta=delta, win=False, multiplier=mult,
+        ))
 
     return MatchEloOutcome(
         avg_elo=avg_elo,
@@ -154,27 +144,27 @@ def apply_match_validation(
 
 
 def _apply_player(
-    col, player: dict, *, match_id: Any, delta: int, win: bool, multiplier: float = 1.0,
+    col, player: dict, *, queue_type: str, match_id, delta: int,
+    win: bool, multiplier: float = 1.0,
 ) -> PlayerEloChange:
-    """Applique le delta ELO de maniere **idempotente par match**.
+    """Applique le delta ELO de maniere idempotente par match.
 
-    Utilise un set `processed_matches` sur le doc joueur pour eviter la
-    double-application si `apply_match_validation` est rejouee apres un
-    crash partiel (release_elo_claim suivi d'un nouveau claim au prochain
-    tick). Le filtre `processed_matches: {$nin: [match_id]}` rend la mise
-    a jour CAS atomique."""
+    Le doc joueur est identifie par compound _id `<user_id>:<queue_type>`.
+    L'idempotence par match est preservee via `processed_matches`."""
     uid  = str(player["id"])
     name = player.get("name", uid)
+    doc_id = repository.player_doc_id(uid, queue_type)
     match_id_str = str(match_id) if match_id is not None else None
 
-    # 1) Ensure doc existe (idempotent, ne touche pas elo/wins/losses si deja la).
     col.update_one(
-        {"_id": uid},
+        {"_id": doc_id},
         {"$setOnInsert": {
-            "name": name,
-            "elo":  elo_calc.ELO_START,
-            "wins": 0,
-            "losses": 0,
+            "name":       name,
+            "elo":        elo_calc.ELO_START,
+            "wins":       0,
+            "losses":     0,
+            "queue_type": queue_type,
+            "user_id":    uid,
         }},
         upsert=True,
     )
@@ -186,33 +176,25 @@ def _apply_player(
     }
     if match_id_str is not None:
         update["$addToSet"] = {"processed_matches": match_id_str}
-        filter_q = {"_id": uid, "processed_matches": {"$nin": [match_id_str]}}
+        filter_q = {"_id": doc_id, "processed_matches": {"$nin": [match_id_str]}}
     else:
-        filter_q = {"_id": uid}
+        filter_q = {"_id": doc_id}
 
-    # 2) CAS atomique : applique uniquement si match pas deja processe.
     pre = col.find_one_and_update(
         filter_q, update, return_document=ReturnDocument.BEFORE,
     )
 
     if pre is None:
-        # Match deja applique pour ce joueur : no-op idempotent.
-        cur_doc = col.find_one({"_id": uid})
+        cur_doc = col.find_one({"_id": doc_id})
         cur_elo = int(cur_doc.get("elo", 0)) if cur_doc else 0
         return PlayerEloChange(
-            user_id=uid, name=name,
-            old_elo=cur_elo, new_elo=cur_elo,
+            user_id=uid, name=name, old_elo=cur_elo, new_elo=cur_elo,
             delta=0, win=win, multiplier=multiplier,
         )
 
     old_elo = int(pre.get("elo", 0))
     new_elo = old_elo + delta
     return PlayerEloChange(
-        user_id=uid,
-        name=name,
-        old_elo=old_elo,
-        new_elo=new_elo,
-        delta=delta,
-        win=win,
-        multiplier=multiplier,
+        user_id=uid, name=name, old_elo=old_elo, new_elo=new_elo,
+        delta=delta, win=win, multiplier=multiplier,
     )
