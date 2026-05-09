@@ -55,3 +55,32 @@ def test_player_doc_id_rejects_unknown_type():
 def test_active_queue_id_rejects_unknown_type():
     with pytest.raises(ValueError, match="queue_type"):
         active_queue_id("ranked")
+
+
+import mongomock
+from services.repository import get_or_create_player
+
+
+def test_get_or_create_player_uses_compound_id():
+    db = mongomock.MongoClient(tz_aware=True).db
+    col = db["elo_42"]
+
+    doc = get_or_create_player(col, user_id=1, queue_type="pro",
+                                display_name="Alice", initial_elo=2000)
+    assert doc["_id"] == "1:pro"
+    assert doc["elo"] == 2000
+    assert doc["wins"] == 0
+    assert doc["queue_type"] == "pro"
+    assert doc["name"] == "Alice"
+
+
+def test_get_or_create_player_isolates_queue_types():
+    db = mongomock.MongoClient(tz_aware=True).db
+    col = db["elo_42"]
+    get_or_create_player(col, user_id=1, queue_type="pro",
+                          display_name="Alice", initial_elo=2000)
+    get_or_create_player(col, user_id=1, queue_type="open",
+                          display_name="Alice", initial_elo=2000)
+    docs = list(col.find())
+    assert len(docs) == 2
+    assert {d["_id"] for d in docs} == {"1:pro", "1:open"}

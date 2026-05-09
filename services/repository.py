@@ -103,24 +103,27 @@ def set_bypass_role(db: Database, guild_id: int | str, role_id: int) -> None:
 def get_or_create_player(
     col,
     user_id: int | str,
+    queue_type: str,
     display_name: str,
-    initial_elo: int = 0,
+    initial_elo: int = 2000,
 ) -> Mapping[str, Any]:
-    """Recupere ou cree atomiquement le doc joueur, met a jour le display_name.
+    """Recupere ou cree atomiquement le doc joueur d'une queue.
 
-    Atomique via find_one_and_update + upsert : empeche le DuplicateKeyError si
-    deux callers concurrents (ex: deux /win simultanes) tentent de creer le
-    meme joueur. `$setOnInsert` garantit que `elo`/`wins`/`losses` ne sont
-    initialises qu'a la premiere creation."""
-    uid = str(user_id)
+    Le `_id` est `<user_id>:<queue_type>` (compound). Le champ `queue_type`
+    est aussi persiste pour permettre les filtres par type (leaderboard,
+    /reset-queue) sans regex sur _id."""
+    _check_queue_type(queue_type)
+    doc_id = player_doc_id(user_id, queue_type)
     doc = col.find_one_and_update(
-        {"_id": uid},
+        {"_id": doc_id},
         {
             "$set": {"name": display_name},
             "$setOnInsert": {
-                "elo":    initial_elo,
-                "wins":   0,
-                "losses": 0,
+                "elo":         initial_elo,
+                "wins":        0,
+                "losses":      0,
+                "queue_type":  queue_type,
+                "user_id":     str(user_id),
             },
         },
         upsert=True,
