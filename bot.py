@@ -460,11 +460,11 @@ async def leaderboard(interaction: discord.Interaction, queue: str):
     await interaction.followup.send(file=file, view=view, ephemeral=ephemeral)
 
 # ── /resetelo ──────────────────────────────────────────────────
-@tree.command(name="resetelo", description="Remet l'ELO d'un joueur (ou de tous) a 0 dans une queue")
+@tree.command(name="resetelo", description=f"Remet l'ELO d'un joueur (ou de tous) a {ELO_START} dans une queue")
 @app_commands.describe(
     queue="Type de queue",
-    joueur="Le joueur a remettre a zero",
-    all="Remettre l'ELO de tous les joueurs de cette queue a 0",
+    joueur="Le joueur a remettre a la valeur initiale",
+    all=f"Remettre l'ELO de tous les joueurs de cette queue a {ELO_START}",
 )
 @app_commands.choices(queue=_QUEUE_CHOICES)
 async def resetelo(
@@ -481,11 +481,11 @@ async def resetelo(
         count = col.count_documents({"queue_type": queue})
         col.update_many(
             {"queue_type": queue},
-            {"$set": {"elo": 0, "wins": 0, "losses": 0}},
+            {"$set": {"elo": ELO_START, "wins": 0, "losses": 0}},
         )
         embed = discord.Embed(
             title=f"🔄 Reset général {queue.upper()} !",
-            description=f"ELO de **{count} joueur(s)** remis a 0 dans la queue {queue.upper()}.",
+            description=f"ELO de **{count} joueur(s)** remis a {ELO_START} dans la queue {queue.upper()}.",
             color=0xe74c3c,
             timestamp=datetime.now(timezone.utc),
         )
@@ -500,7 +500,7 @@ async def resetelo(
     old = doc["elo"]
     col.update_one(
         {"_id": repository.player_doc_id(joueur.id, queue)},
-        {"$set": {"elo": 0, "wins": 0, "losses": 0}},
+        {"$set": {"elo": ELO_START, "wins": 0, "losses": 0}},
     )
     embed = discord.Embed(
         title=f"🔄 ELO {queue.upper()} réinitialisé !",
@@ -509,7 +509,7 @@ async def resetelo(
     )
     embed.add_field(name="Joueur", value=joueur.mention, inline=True)
     embed.add_field(name="Ancien ELO", value=str(old), inline=True)
-    embed.add_field(name="Nouvel ELO", value="0", inline=True)
+    embed.add_field(name="Nouvel ELO", value=str(ELO_START), inline=True)
     embed.set_thumbnail(url=joueur.display_avatar.url)
     embed.set_footer(text=f"Reset par {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
@@ -825,7 +825,7 @@ async def help_cmd(interaction: discord.Interaction, type: str = "membres"):
         embed.add_field(name="/elomodify queue @j action montant", value="Ajoute ou enleve de l'ELO d'un joueur dans une queue", inline=False)
         embed.add_field(name="/winmodify queue @j action montant", value="Ajoute ou enleve des victoires", inline=False)
         embed.add_field(name="/losemodify queue @j action montant", value="Ajoute ou enleve des défaites", inline=False)
-        embed.add_field(name="/resetelo queue [@joueur|all]", value="Reset ELO d'un joueur (ou tous) dans une queue", inline=False)
+        embed.add_field(name="/resetelo queue [@joueur|all]", value=f"Reset ELO d'un joueur (ou tous) a {ELO_START} dans une queue", inline=False)
         embed.add_field(name="/reset-queue queue",   value="Drop complet d'une queue (ELO + matchs + leaderboard) — confirmation requise", inline=False)
         embed.add_field(name="/bypass @role",        value="Donne acces aux commandes admin a un role", inline=False)
         embed.add_field(name="/clear nombre",        value="Supprime des messages", inline=False)
@@ -995,11 +995,11 @@ async def resetelo_prefix(ctx, member: discord.Member):
     col = get_elo_col(ctx.guild.id)
     doc = get_player(col, member)
     old = doc["elo"]
-    col.update_one({"_id": str(member.id)}, {"$set": {"elo": 0, "wins": 0, "losses": 0}})
+    col.update_one({"_id": str(member.id)}, {"$set": {"elo": ELO_START, "wins": 0, "losses": 0}})
     embed = discord.Embed(title="🔄 ELO réinitialisé !", color=0x95a5a6, timestamp=datetime.now(timezone.utc))
     embed.add_field(name="Joueur", value=member.mention, inline=True)
     embed.add_field(name="Ancien ELO", value=str(old), inline=True)
-    embed.add_field(name="Nouvel ELO", value="0", inline=True)
+    embed.add_field(name="Nouvel ELO", value=str(ELO_START), inline=True)
     await ctx.send(embed=embed)
     await _refresh_leaderboard_safe(ctx.guild)
 

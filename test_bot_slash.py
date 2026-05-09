@@ -356,7 +356,7 @@ async def test_slash_resetelo_single_player():
     await bot_module.resetelo.callback(inter, queue="open", joueur=target, all=False)
 
     doc = col.find_one({"_id": "2:open"})
-    assert doc["elo"] == 0
+    assert doc["elo"] == bot_module.ELO_START
     assert doc["wins"] == 0
     assert doc["losses"] == 0
 
@@ -379,7 +379,7 @@ async def test_slash_resetelo_all_players():
 
     for t in targets:
         doc = col.find_one({"_id": f"{t.id}:open"})
-        assert doc["elo"] == 0
+        assert doc["elo"] == bot_module.ELO_START
         assert doc["wins"] == 0
 
 

@@ -211,7 +211,7 @@ automatique. Le gain/loss est PROPORTIONNEL a la moyenne d'ELO du groupe
     Ajoute ou retire N defaites.
 
   /resetelo joueur:@j  ou  all:True
-    Remet l'ELO d'un joueur (ou de tous) a 0.
+    Remet l'ELO d'un joueur (ou de tous) a 2000 (ELO de depart).
 
 Toutes ces commandes sont reservees aux admins (manage_guild) ou au role
 configure via /bypass.
