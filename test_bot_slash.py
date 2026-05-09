@@ -129,7 +129,8 @@ async def test_slash_win_5_players_distributes_elo_v2():
     for slot, t in enumerate(targets):
         doc = col.find_one({"_id": str(t.id)})
         gain = expected_gains[slot]
-        assert doc["elo"] == gain, f"{t.display_name}: attendu {gain}, recu {doc['elo']}"
+        expected_elo = 2000 + gain
+        assert doc["elo"] == expected_elo, f"{t.display_name}: attendu {expected_elo}, recu {doc['elo']}"
         assert doc["wins"] == 1
 
 
@@ -310,7 +311,7 @@ async def test_slash_elomodify_add():
 
     col = bot_module.get_elo_col(42)
     doc = col.find_one({"_id": "2"})
-    assert doc["elo"] == 50
+    assert doc["elo"] == 2050
 
 
 async def test_slash_elomodify_remove_floors_at_zero():

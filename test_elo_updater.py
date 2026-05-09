@@ -109,8 +109,8 @@ def test_losers_get_minus_loss_in_db():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5, 10):
         doc = elo_col.find_one({"_id": str(i)})
-        # New player : ELO_START=0, max(0, 0-15) = 0
-        assert doc["elo"] == 0
+        # New player : ELO_START=2000, 2000 - 16 = 1984 (flat loss=16)
+        assert doc["elo"] == 1984
         assert doc["losses"] == 1
         assert doc["wins"] == 0
 
