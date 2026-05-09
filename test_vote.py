@@ -506,7 +506,7 @@ def _seed_db_elos(db, guild_id: int = 42, baseline: int = 2000) -> None:
     col = repository.get_elo_col(db, guild_id)
     for i in range(10):
         col.insert_one({
-            "_id": str(i), "name": f"P{i}",
+            "_id": f"{i}:open", "name": f"P{i}",
             "elo": baseline, "wins": 0, "losses": 0,
         })
 
@@ -543,12 +543,12 @@ async def test_validation_triggers_elo_update_in_db():
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     for i in range(5):
-        doc = elo_col.find_one({"_id": str(i)})
+        doc = elo_col.find_one({"_id": f"{i}:open"})
         # _verify_match force_apply=True sans Henrik -> flat fallback +16
         assert doc["elo"] == 2016, f"Winner {i}: ELO {doc['elo']}"
         assert doc["wins"] == 1
     for i in range(5, 10):
-        doc = elo_col.find_one({"_id": str(i)})
+        doc = elo_col.find_one({"_id": f"{i}:open"})
         assert doc["elo"] == 1984  # 2000 - 16
         assert doc["losses"] == 1
 
@@ -605,7 +605,7 @@ async def test_validation_with_high_elo_match_bigger_gain():
 
     elo_col = repository.get_elo_col(bot_module.db, 42)
     # Sans Henrik -> flat fallback +16 (independant de l'avg ELO du match).
-    assert elo_col.find_one({"_id": "0"})["elo"] == 2016
+    assert elo_col.find_one({"_id": "0:open"})["elo"] == 2016
 
 
 async def test_validated_b_distributes_correctly():
@@ -625,12 +625,12 @@ async def test_validated_b_distributes_correctly():
     elo_col = repository.get_elo_col(bot_module.db, 42)
     # team_b (5..9) gagnent +16 (flat sans Henrik) -> 2016
     for i in range(5, 10):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 2016
-        assert elo_col.find_one({"_id": str(i)})["wins"] == 1
+        assert elo_col.find_one({"_id": f"{i}:open"})["elo"] == 2016
+        assert elo_col.find_one({"_id": f"{i}:open"})["wins"] == 1
     # team_a (0..4) perdent -16 -> 1984
     for i in range(5):
-        assert elo_col.find_one({"_id": str(i)})["elo"] == 1984
-        assert elo_col.find_one({"_id": str(i)})["losses"] == 1
+        assert elo_col.find_one({"_id": f"{i}:open"})["elo"] == 1984
+        assert elo_col.find_one({"_id": f"{i}:open"})["losses"] == 1
 
 
 async def test_vote_validation_does_not_touch_elo():
