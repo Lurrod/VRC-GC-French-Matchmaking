@@ -1302,6 +1302,127 @@ class WelcomeView(discord.ui.View):
         await interaction.response.send_message("## Pour quel poste souhaites-tu postuler ? 🎮", view=RoleChoiceView(), ephemeral=True)
 
 
+# ── /report ────────────────────────────────────────────────────
+TICKETS_CATEGORY_NAME = "Tickets"
+
+
+class CloseTicketView(discord.ui.View):
+    """Vue persistante : un bouton 'Fermer le ticket' qui supprime le salon."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Fermer le ticket",
+        style=discord.ButtonStyle.danger,
+        custom_id="ticket_close_btn",
+    )
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        if channel is None or not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "❌ Impossible de fermer ce salon ici.", ephemeral=True,
+            )
+            return
+        try:
+            await interaction.response.send_message(
+                "🔒 Fermeture du ticket...", ephemeral=True,
+            )
+        except discord.HTTPException:
+            pass
+        try:
+            await channel.delete(reason=f"Ticket ferme par {interaction.user}")
+        except discord.Forbidden:
+            try:
+                await interaction.followup.send(
+                    "❌ Permission manquante pour supprimer ce salon.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                pass
+        except discord.HTTPException:
+            logger.exception("[ticket] suppression du salon a leve")
+
+
+class ReportModal(discord.ui.Modal, title="Envoyer un report anonyme"):
+    contenu = discord.ui.TextInput(
+        label="Decris ton report",
+        placeholder="Explique ce qu'il se passe (anonyme)...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send(
+                "❌ Cette commande doit etre utilisee dans un serveur.",
+                ephemeral=True,
+            )
+            return
+
+        category = discord.utils.get(guild.categories, name=TICKETS_CATEGORY_NAME)
+        if category is None:
+            try:
+                category = await guild.create_category(TICKETS_CATEGORY_NAME)
+            except discord.Forbidden:
+                await interaction.followup.send(
+                    "❌ Le bot n'a pas la permission **Gerer les salons** pour "
+                    f"creer la categorie `{TICKETS_CATEGORY_NAME}`.",
+                    ephemeral=True,
+                )
+                return
+
+        # Calcule le prochain numero ticket-N dans la categorie.
+        existing_numbers: list[int] = []
+        for chan in category.text_channels:
+            name = chan.name
+            if name.startswith("ticket-"):
+                suffix = name[len("ticket-"):]
+                if suffix.isdigit():
+                    existing_numbers.append(int(suffix))
+        next_number = (max(existing_numbers) + 1) if existing_numbers else 1
+        channel_name = f"ticket-{next_number}"
+
+        # Permissions : ticket anonyme — l'auteur n'a PAS d'acces particulier
+        # (sinon le staff verrait qui a ouvert via la liste des membres
+        # autorises). On herite simplement des permissions de la categorie.
+        try:
+            ticket_channel = await guild.create_text_channel(
+                channel_name, category=category,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Le bot n'a pas la permission de creer le salon ticket.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"🎫 Nouveau report — {channel_name}",
+            description=self.contenu.value,
+            color=0xe67e22,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text="Report anonyme")
+        try:
+            await ticket_channel.send(embed=embed, view=CloseTicketView())
+        except discord.HTTPException:
+            logger.exception("[ticket] envoi du message initial a leve")
+
+        await interaction.followup.send(
+            f"✅ Ton report anonyme a ete envoye ({ticket_channel.mention}).",
+            ephemeral=True,
+        )
+
+
+@tree.command(name="report", description="Envoie un report anonyme dans la categorie Tickets")
+async def report(interaction: discord.Interaction):
+    await interaction.response.send_modal(ReportModal())
+
+
 # ── /welcome ───────────────────────────────────────────────────
 @tree.command(name="welcome", description="Envoie le message de bienvenue dans le salon verify")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1373,6 +1494,7 @@ async def on_ready():
     # Premier on_ready uniquement : enregistrement des views persistantes.
     bot.add_view(WelcomeView())
     bot.add_view(ApplicationReviewView())
+    bot.add_view(CloseTicketView())
 
     # Sync rapide sur une guild specifique si DEV_GUILD_ID est defini.
     # Sinon, sync global (peut prendre jusqu'a 1h pour propager).

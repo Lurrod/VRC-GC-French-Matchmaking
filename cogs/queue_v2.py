@@ -582,11 +582,14 @@ class QueueCog(commands.Cog):
         self, interaction: discord.Interaction, queue: str,
     ) -> None:
         # Recupere la queue active pour pouvoir supprimer le message
-        # persistant Rejoindre/Quitter dans Discord avant la purge DB.
+        # persistant Rejoindre/Quitter dans Discord avant la purge DB,
+        # et capturer la liste des joueurs avant de purger.
         queue_doc = repository.get_active_queue(
             self.db, interaction.guild_id, queue,
         )
+        player_ids: list[int] = []
         if queue_doc is not None:
+            player_ids = [int(uid) for uid in queue_doc.get("players", [])]
             channel = interaction.guild.get_channel(
                 int(queue_doc["channel_id"]),
             )
@@ -606,6 +609,33 @@ class QueueCog(commands.Cog):
         deleted = repository.delete_active_queue(
             self.db, interaction.guild_id, queue,
         )
+
+        # Apres la purge DB, retirer le role "En Queue" a chaque joueur
+        # qui n'est plus dans aucune autre queue active. Le check
+        # `find_player_in_any_queue` garantit qu'on ne strip pas le role
+        # a un joueur encore present dans une autre queue (un joueur ne
+        # peut techniquement etre que dans une seule, mais on reste safe).
+        if player_ids:
+            guild = interaction.guild
+            role_tasks: list = []
+            for uid in player_ids:
+                member = guild.get_member(uid)
+                if member is None:
+                    continue
+                still_in = await asyncio.to_thread(
+                    repository.find_player_in_any_queue,
+                    self.db, guild.id, uid,
+                )
+                if still_in is None:
+                    role_tasks.append(_revoke_queue_role(member))
+            if role_tasks:
+                results = await asyncio.gather(*role_tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, BaseException):
+                        logger.warning(
+                            "[queue_v2] close-queue revoke role a echoue: %r", r,
+                        )
+
         msg = (
             f"✅ Queue {queue.upper()} supprimee."
             if deleted else f"ℹ️ Aucune queue {queue.upper()} active."
