@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
+from pymongo.errors import DuplicateKeyError
 
 from services import repository
 
@@ -110,17 +111,30 @@ class RiotLinkCog(commands.Cog):
         # 3) Persister la metadata Riot (utilisee pour la queue gate-keep
         # et la verification post-match via HenrikDev). Aucun seed ELO :
         # l'ELO de chaque queue demarre a ELO_START au premier match.
-        repository.link_riot_account(
-            self.db,
-            guild_id=interaction.guild_id,
-            user_id=interaction.user.id,
-            riot_name=name,
-            riot_tag=tag,
-            riot_region=region,
-            puuid=account.puuid,
-            peak_elo=0,
-            source="link_base",
-        )
+        # DuplicateKeyError : course condition avec un autre Discord qui
+        # linke le meme PUUID en parallele. L'index unique sur puuid
+        # protege la data — on remonte le meme message friendly que le
+        # check de dedup ci-dessus.
+        try:
+            repository.link_riot_account(
+                self.db,
+                guild_id=interaction.guild_id,
+                user_id=interaction.user.id,
+                riot_name=name,
+                riot_tag=tag,
+                riot_region=region,
+                puuid=account.puuid,
+                peak_elo=0,
+                source="link_base",
+            )
+        except DuplicateKeyError:
+            await interaction.followup.send(
+                f"❌ Le compte Riot **{name}#{tag}** est deja lie a un autre "
+                "membre du serveur. Un compte Riot ne peut etre lie qu'a un "
+                "seul compte Discord par serveur.",
+                ephemeral=True,
+            )
+            return
 
         # 5) Embed de confirmation
         embed = discord.Embed(

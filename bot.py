@@ -1057,6 +1057,10 @@ class RefuseReasonModal(discord.ui.Modal, title="Raison du refus"):
         self.applicant_id = applicant_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer en premier : la CAS DB qui suit peut latencer et le token
+        # d'interaction expire a 3s. Sans defer, l'utilisateur voit
+        # "Unknown interaction" si la DB tarde.
+        await interaction.response.defer(ephemeral=True)
         # CAS atomique : empeche refuse concurrent avec accept (autre admin).
         # Doit etre fait avant tout side-effect (kick, DM, edit).
         claimed = repository.claim_application_decision(
@@ -1064,7 +1068,7 @@ class RefuseReasonModal(discord.ui.Modal, title="Raison du refus"):
             status="refused", decided_by=interaction.user.id,
         )
         if not claimed:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Cette candidature a deja ete traitee par un autre admin.",
                 ephemeral=True,
             )
@@ -1093,7 +1097,7 @@ class RefuseReasonModal(discord.ui.Modal, title="Raison du refus"):
                 await interaction.message.edit(view=None)
             except Exception:
                 pass
-        await interaction.response.send_message("✅ Candidature refusée et utilisateur kické.", ephemeral=True)
+        await interaction.followup.send("✅ Candidature refusée et utilisateur kické.", ephemeral=True)
 
 
 def _parse_application_embed(message: discord.Message) -> tuple[int | None, str, bool]:
@@ -1138,6 +1142,11 @@ class ApplicationReviewView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        # Defer en premier : le token d'interaction expire a 3s, et la
+        # CAS DB qui suit peut latencer. Sans ce defer, un double-clic
+        # rapide peut produire "Unknown interaction" sur la 1re tentative
+        # alors que la 2e progresse (CAS protege la data mais l'UX casse).
+        await interaction.response.defer(ephemeral=True)
         # CAS atomique : seul un admin peut decider chaque candidature.
         # Empeche role grant + kick concurrents si 2 admins cliquent en
         # meme temps (accept/refuse), et le double DM.
@@ -1146,12 +1155,11 @@ class ApplicationReviewView(discord.ui.View):
             status="accepted", decided_by=interaction.user.id,
         )
         if not claimed:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Cette candidature a deja ete traitee par un autre admin.",
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True)
         applicant_id, pseudo, is_staff = _parse_application_embed(interaction.message)
         if applicant_id is None:
             await interaction.followup.send(
@@ -1332,6 +1340,9 @@ class CloseTicketView(discord.ui.View):
             pass
         try:
             await channel.delete(reason=f"Ticket ferme par {interaction.user}")
+        except discord.NotFound:
+            # Salon deja supprime (double-clic / autre admin) — rien a faire.
+            pass
         except discord.Forbidden:
             try:
                 await interaction.followup.send(
