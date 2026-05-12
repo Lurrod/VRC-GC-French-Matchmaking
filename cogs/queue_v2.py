@@ -39,7 +39,7 @@ from discord.ext import commands
 from services import repository
 
 
-# Roles "Match #1", "Match #2", "Match #3", "Match #4" attribues a un joueur en cours
+# Roles "Match #1", "Match #2", "Match #3", "Match #4", "Match #5" attribues a un joueur en cours
 # de match. Tant qu'un joueur a un de ces roles, il est dans un match
 # pending (vote non termine) — on lui refuse l'entree dans une nouvelle
 # queue. Le role est retire des le vote valide, donc le joueur peut

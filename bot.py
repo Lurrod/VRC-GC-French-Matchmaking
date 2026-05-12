@@ -16,6 +16,7 @@ from services import elo_calc, repository
 from services.riot_api import HenrikDevClient
 from services.leaderboard_refresh import (
     build_leaderboard_payload,
+    LeaderboardView,
     refresh_leaderboard_channel,
 )
 
@@ -1583,6 +1584,10 @@ async def on_ready():
     bot.add_view(ApplicationReviewView())
     bot.add_view(CloseTicketView())
     bot.add_view(ReportView())
+    # LeaderboardView : pagination des messages leaderboard persistants
+    # postes dans #leaderboard. Sans cet enregistrement, les boutons
+    # prev/next ne fonctionnent plus apres un restart du bot.
+    bot.add_view(LeaderboardView())
 
     # Sync rapide sur une guild specifique si DEV_GUILD_ID est defini.
     # Sinon, sync global (peut prendre jusqu'a 1h pour propager).

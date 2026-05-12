@@ -127,7 +127,7 @@ def build_match_embed(
     else:
         embed.add_field(
             name="🔊 Vocaux",
-            value="⚠️ Aucune categorie libre (`Match #1/2/3/4` toutes occupees).",
+            value="⚠️ Aucune categorie libre (`Match #1/2/3/4/5` toutes occupees).",
             inline=False,
         )
 
@@ -452,12 +452,12 @@ class MatchCog(commands.Cog):
             )
             return None
 
-        # Recherche d'un salon 'match-preparation' libre (categories Match #1/2/3/4)
+        # Recherche d'un salon 'match-preparation' libre (categories Match #1/2/3/4/5)
         free = find_free_match_prep(guild)
         if free is None:
             await self._fail(
                 interaction, queue_doc,
-                "Aucun salon 'match-preparation' libre dans les categories Match #1/2/3/4.",
+                "Aucun salon 'match-preparation' libre dans les categories Match #1/2/3/4/5.",
                 queue_type=queue_type,
             )
             return None

@@ -101,7 +101,7 @@ def serialize_team(team: tuple[Player, ...]) -> list[dict]:
 
 def find_free_match_category(guild) -> str | None:
     """
-    Cherche une categorie 'Match #1/2/3/4' dont les VCs Team 1 / Team 2 sont vides.
+    Cherche une categorie 'Match #1/2/3/4/5' dont les VCs Team 1 / Team 2 sont vides.
     Renvoie le nom de la categorie ou None si aucune libre.
     """
     free = find_free_match_prep(guild)
@@ -118,7 +118,7 @@ def find_free_match_prep(guild) -> tuple[str, object] | None:
         avec un salon 'match-preparation' configure.
     """
     import discord  # import local pour ne pas alourdir l'import du module
-    for i in range(1, 5):
+    for i in range(1, 6):
         cat_name = f"Match #{i}"
         category = discord.utils.get(guild.categories, name=cat_name)
         if category is None:

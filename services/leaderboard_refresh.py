@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 import asyncio
+import re
 from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional, Tuple
@@ -41,12 +42,181 @@ _MAX_GUILDS_TRACKED: int = 1024
 _LAST_REFRESH_AT: "OrderedDict[tuple[int, str], datetime]" = OrderedDict()
 
 
+_PAGE_LABEL_RE = re.compile(r"^\s*Page\s+(\d+)\s*/\s*(\d+)\s*$")
+_ATTACH_FILENAME_RE = re.compile(r"^leaderboard_([a-z0-9_\-]+)\.png$", re.IGNORECASE)
+
+
+class LeaderboardView(discord.ui.View):
+    """Vue paginee persistante pour le leaderboard.
+
+    Persistante = survit aux restarts du bot. Pour que les boutons
+    fonctionnent apres un redemarrage, la vue doit (1) avoir des
+    `custom_id` stables et (2) etre enregistree dans `on_ready` via
+    `bot.add_view(LeaderboardView())`.
+
+    L'etat par-message (queue_type, page courante) n'est PAS stocke
+    cote bot : il est recupere depuis le message lui-meme :
+      - `queue_type` -> attachement nomme `leaderboard_{qt}.png`
+      - page courante -> label du bouton central `Page N / M`
+
+    A chaque clic, on relit la BDD pour afficher des donnees fraiches
+    (le leaderboard peut avoir bouge depuis le dernier rendu).
+    """
+
+    def __init__(
+        self, *,
+        page: int = 0,
+        total_pages: int = 1,
+        queue_type: Optional[str] = None,
+    ):
+        super().__init__(timeout=None)
+        self.page = page
+        self.total_pages = total_pages
+        self.queue_type = queue_type
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        # Ordre des children = ordre des decorateurs @discord.ui.button :
+        # 0=prev_btn, 1=page_btn, 2=next_btn.
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= self.total_pages - 1
+        self.page_btn.label    = f"Page {self.page + 1} / {self.total_pages}"
+
+    @staticmethod
+    def _recover_state(message) -> Tuple[Optional[str], int, int]:
+        """Reconstitue (queue_type, page_zero_indexee, total_pages) depuis un message.
+
+        Robuste aux mocks et messages incomplets : retourne (None, 0, 1) si
+        rien d'exploitable n'est trouve.
+        """
+        qt: Optional[str] = None
+        attachments = getattr(message, "attachments", None)
+        if isinstance(attachments, (list, tuple)):
+            for att in attachments:
+                fn = getattr(att, "filename", "") or ""
+                m = _ATTACH_FILENAME_RE.match(fn)
+                if m:
+                    qt = m.group(1).lower()
+                    break
+
+        page0, total = 0, 1
+        components = getattr(message, "components", None)
+        if isinstance(components, (list, tuple)):
+            for row in components:
+                children = getattr(row, "children", None)
+                if not isinstance(children, (list, tuple)):
+                    continue
+                for comp in children:
+                    label = getattr(comp, "label", None)
+                    if not isinstance(label, str):
+                        continue
+                    m = _PAGE_LABEL_RE.match(label)
+                    if m:
+                        page0 = max(0, int(m.group(1)) - 1)
+                        total = max(1, int(m.group(2)))
+                        return qt, page0, total
+        return qt, page0, total
+
+    async def _go(self, inter, new_page: int) -> None:
+        """Navigue vers `new_page` (index 0-base, absolu)."""
+        try:
+            queue_type = self.queue_type
+            total = self.total_pages
+
+            # Dispatch persistant : l'instance enregistree au niveau bot n'a
+            # pas d'etat par-message, on reconstruit depuis le message.
+            recovered_from_message = False
+            if queue_type is None:
+                msg = getattr(inter, "message", None)
+                if msg is None:
+                    return
+                qt, _, rec_total = self._recover_state(msg)
+                if qt is None:
+                    if not inter.response.is_done():
+                        await inter.response.defer()
+                    return
+                queue_type = qt
+                total = rec_total
+                recovered_from_message = True
+
+            if new_page < 0 or new_page >= total:
+                if not inter.response.is_done():
+                    await inter.response.defer()
+                return
+
+            if not inter.response.is_done():
+                await inter.response.defer()
+
+            # Import tardif : evite la dependance circulaire bot <-> services
+            # au moment du chargement des modules.
+            from bot import db as _db
+
+            file, new_view = await build_leaderboard_payload(
+                inter.guild, _db, queue_type, page=new_page,
+            )
+            if file is None:
+                return
+
+            # Ne muter `self` que si on est sur l'instance par-message
+            # (queue_type initial non-None). Sur l'instance globale
+            # enregistree, muter polluerait les dispatches suivants entre
+            # guilds / queue_types differents.
+            if not recovered_from_message:
+                self.page = new_page
+                if new_view is not None:
+                    self.total_pages = getattr(new_view, "total_pages", total)
+                self._sync_buttons()
+
+            await inter.followup.edit_message(
+                message_id=inter.message.id,
+                attachments=[file], view=new_view,
+            )
+        except Exception:
+            logger.exception("leaderboard_refresh exception")
+
+    @discord.ui.button(
+        emoji="◀️", style=discord.ButtonStyle.secondary, custom_id="lb:prev",
+    )
+    async def prev_btn(self, inter, button):
+        cur = self.page
+        msg = getattr(inter, "message", None)
+        if msg is not None:
+            _, m_page, _ = self._recover_state(msg)
+            # Si le message porte un label "Page N / M" exploitable, il fait
+            # autorite sur self.page (qui est 0 sur l'instance enregistree).
+            if m_page > 0 or self.queue_type is None:
+                cur = m_page
+        await self._go(inter, cur - 1)
+
+    @discord.ui.button(
+        label="Page 1 / 1", style=discord.ButtonStyle.grey,
+        disabled=True, custom_id="lb:page",
+    )
+    async def page_btn(self, inter, button):
+        if not inter.response.is_done():
+            await inter.response.defer()
+
+    @discord.ui.button(
+        emoji="▶️", style=discord.ButtonStyle.secondary, custom_id="lb:next",
+    )
+    async def next_btn(self, inter, button):
+        cur = self.page
+        msg = getattr(inter, "message", None)
+        if msg is not None:
+            _, m_page, _ = self._recover_state(msg)
+            if m_page > 0 or self.queue_type is None:
+                cur = m_page
+        await self._go(inter, cur + 1)
+
+
 async def build_leaderboard_payload(
     guild: discord.Guild, db, queue_type: str, *,
     with_view: bool = True,
-    view_timeout: float | None = 300,
+    view_timeout: float | None = None,   # conserve pour back-compat, ignore (vue toujours persistante)
+    page: int = 0,
 ) -> Tuple[Optional[discord.File], Optional[discord.ui.View]]:
-    """Genere file/view pour le leaderboard du queue_type donne."""
+    """Genere file/view pour le leaderboard du queue_type donne, page `page`."""
+    del view_timeout  # parametre conserve pour API stable, vue toujours timeout=None
     repository._check_queue_type(queue_type)
     col  = repository.get_elo_col(db, guild.id)
     docs = list(col.find({"queue_type": queue_type})
@@ -82,65 +252,25 @@ async def build_leaderboard_payload(
         return None, None
 
     total_pages = max(1, (len(all_players) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
     loop = asyncio.get_running_loop()
+    start = page * PAGE_SIZE
+    chunk = all_players[start:start + PAGE_SIZE]
+    # Le titre du leaderboard inclut le queue_type pour distinguer les
+    # 3 leaderboards qui cohabitent dans #leaderboard.
+    title = f"Leaderboard {queue_type.upper()} Queue"
+    buf = await loop.run_in_executor(
+        None,
+        lambda: generate_leaderboard(chunk, server_name=f"{guild.name} - {title}"),
+    )
+    file = discord.File(buf, filename=f"leaderboard_{queue_type}.png")
 
-    async def build_page(page: int) -> discord.File:
-        start = page * PAGE_SIZE
-        chunk = all_players[start:start + PAGE_SIZE]
-        # Le titre du leaderboard inclut le queue_type pour distinguer les
-        # 3 leaderboards qui cohabitent dans #leaderboard.
-        title = f"Leaderboard {queue_type.upper()} Queue"
-        buf   = await loop.run_in_executor(
-            None,
-            lambda: generate_leaderboard(chunk, server_name=f"{guild.name} - {title}"),
-        )
-        return discord.File(buf, filename=f"leaderboard_{queue_type}.png")
-
-    class LeaderboardView(discord.ui.View):
-        def __init__(self, page: int):
-            super().__init__(timeout=view_timeout)
-            self.page = page
-            self.update_buttons()
-
-        def update_buttons(self):
-            self.prev_btn.disabled = self.page == 0
-            self.next_btn.disabled = self.page >= total_pages - 1
-            self.page_btn.label    = f"Page {self.page + 1} / {total_pages}"
-
-        async def _go(self, inter, new_page):
-            if new_page < 0 or new_page >= total_pages:
-                if not inter.response.is_done():
-                    await inter.response.defer()
-                return
-            self.page = new_page
-            self.update_buttons()
-            try:
-                if not inter.response.is_done():
-                    await inter.response.defer()
-                file = await build_page(self.page)
-                await inter.followup.edit_message(
-                    message_id=inter.message.id,
-                    attachments=[file], view=self,
-                )
-            except Exception:
-                logger.exception("leaderboard_refresh exception")
-
-        @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
-        async def prev_btn(self, inter, button):
-            await self._go(inter, self.page - 1)
-
-        @discord.ui.button(label="Page 1 / 1", style=discord.ButtonStyle.grey, disabled=True)
-        async def page_btn(self, inter, button):
-            pass
-
-        @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
-        async def next_btn(self, inter, button):
-            await self._go(inter, self.page + 1)
-
-    file = await build_page(0)
     if not with_view:
         return file, None
-    return file, LeaderboardView(page=0)
+    return file, LeaderboardView(
+        page=page, total_pages=total_pages, queue_type=queue_type,
+    )
 
 
 async def refresh_leaderboard_channel(

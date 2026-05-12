@@ -103,7 +103,7 @@ Quand 10 joueurs sont en queue :
        - Minimise |sum(team_a) - sum(team_b)|
        - Tie-breaker : minimise |max(team_a) - max(team_b)|
        - Tie-breaker 2 : ordre des IDs (deterministe)
-  3. Trouve une categorie "Match #1", "Match #2", "Match #3" ou "Match #4" dont les vocaux
+  3. Trouve une categorie "Match #1", "Match #2", "Match #3", "Match #4" ou "Match #5" dont les vocaux
      "Team 1" et "Team 2" sont vides
   4. Choisit aleatoirement :
        - Une map parmi : Breeze, Ascent, Lotus, Fracture, Split, Haven, Pearl
@@ -406,7 +406,7 @@ Setup serveur Discord :
     - Salon "verify" pour /welcome (candidatures)
     - Salon "candidatures" pour les modales de candidature
     - Salon "match-preparation" pour les annonces de match (V1 vocal queue)
-    - Categories "Match #1", "Match #2", "Match #3", "Match #4" avec :
+    - Categories "Match #1", "Match #2", "Match #3", "Match #4", "Match #5" avec :
         Team 1 (vocal)
         Team 2 (vocal)
         match-preparation (texte)
