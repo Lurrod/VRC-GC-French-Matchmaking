@@ -494,16 +494,36 @@ class MatchCog(commands.Cog):
         # (map, equipes, vocal a rejoindre). Best-effort : crash ici
         # laisse roles partiels mais le match doc existe -> /match-cancel
         # nettoie.
-        for uid in player_ids:
-            member = guild.get_member(int(uid))
-            if member is None:
-                continue
+        #
+        # Parallelisation INTRA-phase : chaque joueur a son propre bucket
+        # de rate-limit Discord (per-member), donc les 10 grants partent
+        # en parallele. Le gather attend que TOUS soient finis avant de
+        # rendre la main -> l'invariant "rôles attribues AVANT le send"
+        # est preserve. Le host role tombe dans le meme gather (ce n'est
+        # pas un gate de visibilite, juste un flag).
+        leader_id = int(plan.lobby_leader.id)
+
+        async def _setup_roles_for(member: discord.Member) -> None:
             await _revoke_queue_role(member)
             await _grant_match_role(member, free_cat_name)
+            if member.id == leader_id:
+                await _grant_match_role(member, MATCH_HOST_ROLE_NAME)
 
-        leader_member = guild.get_member(int(plan.lobby_leader.id))
-        if leader_member is not None:
-            await _grant_match_role(leader_member, MATCH_HOST_ROLE_NAME)
+        role_members = [
+            m for m in (guild.get_member(int(uid)) for uid in player_ids)
+            if m is not None
+        ]
+        if not any(m.id == leader_id for m in role_members):
+            leader_member = guild.get_member(leader_id)
+            if leader_member is not None:
+                role_members.append(leader_member)
+        role_results = await asyncio.gather(
+            *(_setup_roles_for(m) for m in role_members),
+            return_exceptions=True,
+        )
+        for r in role_results:
+            if isinstance(r, BaseException):
+                logger.warning("[match] role setup a echoue: %r", r)
 
         # Etape 3 : envoyer l'annonce. Les joueurs ont desormais le
         # role Match #N et peuvent voir le salon + le message.
@@ -585,21 +605,31 @@ class MatchCog(commands.Cog):
         )
         if waiting_match is None:
             return
-        for uid in player_ids:
+
+        # Parallelisation : bucket per-member, donc 10 moves partent
+        # ensemble (gain ~2-3s vs serie). Les guards (membre absent,
+        # hors vocal, deja a destination) sont evalues dans la coro
+        # pour eviter de creer 10 taches qui ne font rien.
+        async def _move_one(uid: str) -> None:
             member = guild.get_member(int(uid))
             if member is None:
-                continue
+                return
             voice = getattr(member, "voice", None)
             if voice is None or getattr(voice, "channel", None) is None:
-                continue  # joueur hors vocal -> rien a deplacer
+                return
             if voice.channel.id == waiting_match.id:
-                continue  # deja a destination
+                return
             try:
                 await member.move_to(
                     waiting_match, reason="Match forme : regroupement VC",
                 )
             except (discord.Forbidden, discord.HTTPException):
                 pass
+
+        await asyncio.gather(
+            *(_move_one(uid) for uid in player_ids),
+            return_exceptions=True,
+        )
 
     async def _fail(
         self, interaction, queue_doc, reason: str, queue_type: str = "open",
