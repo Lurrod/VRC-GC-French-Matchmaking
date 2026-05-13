@@ -17,6 +17,7 @@ import asyncio
 import re
 from collections import OrderedDict
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Optional, Tuple
 
 import discord
@@ -40,6 +41,61 @@ _REFRESH_DEBOUNCE_SECONDS: int = 30
 # eviction FIFO du plus ancien acces au-dela de _MAX_GUILDS_TRACKED.
 _MAX_GUILDS_TRACKED: int = 1024
 _LAST_REFRESH_AT: "OrderedDict[tuple[int, str], datetime]" = OrderedDict()
+
+# ── Cache des pages rendues ───────────────────────────────────────
+# Cache lazy : la page est rendue a la 1ere consultation et stockee
+# en bytes (pas en discord.File qui est single-use). A chaque cache
+# hit on enveloppe les bytes dans un nouveau BytesIO + File.
+#
+# Invalidation : `refresh_leaderboard_channel` clear toutes les
+# entrees (guild_id, queue_type, *) avant de regenerer la page 1.
+# Toute mutation d'ELO passe par cette fonction -> coherence garantie
+# tant que ce contrat est respecte.
+#
+# Cle  : (guild_id, queue_type, page_zero_indexed)
+# Val  : (png_bytes, total_pages_at_render_time)
+_PAGE_CACHE_MAXSIZE: int = 60   # ~3 queues * 20 pages worst case
+_PAGE_CACHE: "OrderedDict[tuple[int, str, int], tuple[bytes, int]]" = OrderedDict()
+
+
+def _cache_get(guild_id: int, queue_type: str, page: int) -> tuple[bytes, int] | None:
+    key = (guild_id, queue_type, page)
+    val = _PAGE_CACHE.get(key)
+    if val is not None:
+        _PAGE_CACHE.move_to_end(key)
+    return val
+
+
+def _cache_set(
+    guild_id: int, queue_type: str, page: int,
+    png_bytes: bytes, total_pages: int,
+) -> None:
+    key = (guild_id, queue_type, page)
+    _PAGE_CACHE[key] = (png_bytes, total_pages)
+    _PAGE_CACHE.move_to_end(key)
+    while len(_PAGE_CACHE) > _PAGE_CACHE_MAXSIZE:
+        _PAGE_CACHE.popitem(last=False)
+
+
+def _cache_invalidate(guild_id: int, queue_type: str) -> int:
+    """Supprime toutes les entrees du cache pour ce (guild, queue_type).
+
+    Appele depuis `refresh_leaderboard_channel` quand on vient d'apprendre
+    qu'un ELO a change. Retourne le nombre d'entrees supprimees (utile
+    pour le debug et les tests)."""
+    to_remove = [
+        k for k in _PAGE_CACHE
+        if k[0] == guild_id and k[1] == queue_type
+    ]
+    for k in to_remove:
+        del _PAGE_CACHE[k]
+    return len(to_remove)
+
+
+def _clear_page_cache_for_tests() -> None:
+    """Vide entierement le cache. Utilise uniquement par les tests pour
+    isoler les cas (le cache est process-wide, donc partage entre tests)."""
+    _PAGE_CACHE.clear()
 
 
 _PAGE_LABEL_RE = re.compile(r"^\s*Page\s+(\d+)\s*/\s*(\d+)\s*$")
@@ -215,9 +271,31 @@ async def build_leaderboard_payload(
     view_timeout: float | None = None,   # conserve pour back-compat, ignore (vue toujours persistante)
     page: int = 0,
 ) -> Tuple[Optional[discord.File], Optional[discord.ui.View]]:
-    """Genere file/view pour le leaderboard du queue_type donne, page `page`."""
+    """Genere file/view pour le leaderboard du queue_type donne, page `page`.
+
+    Utilise un cache lazy (cf. `_PAGE_CACHE`) pour eviter de re-rendre
+    une page deja generee. Le cache est invalide depuis
+    `refresh_leaderboard_channel` quand un changement d'ELO survient.
+    """
     del view_timeout  # parametre conserve pour API stable, vue toujours timeout=None
     repository._check_queue_type(queue_type)
+
+    # Cache lookup AVANT Mongo : si la page demandee est en cache, on
+    # economise la query DB + le PIL render. La page renvoyee est l'image
+    # exacte rendue lors du dernier render (coherente avec le message
+    # actuellement poste dans #leaderboard).
+    cached = _cache_get(guild.id, queue_type, page)
+    if cached is not None:
+        png_bytes, total_pages_cached = cached
+        file = discord.File(
+            BytesIO(png_bytes), filename=f"leaderboard_{queue_type}.png",
+        )
+        if not with_view:
+            return file, None
+        return file, LeaderboardView(
+            page=page, total_pages=total_pages_cached, queue_type=queue_type,
+        )
+
     col  = repository.get_elo_col(db, guild.id)
     docs = list(col.find({"queue_type": queue_type})
                   .sort([("elo", -1), ("wins", -1), ("_id", 1)]))
@@ -264,7 +342,15 @@ async def build_leaderboard_payload(
         None,
         lambda: generate_leaderboard(chunk, server_name=f"{guild.name} - {title}"),
     )
-    file = discord.File(buf, filename=f"leaderboard_{queue_type}.png")
+
+    # Stocker les bytes raw dans le cache (pas le discord.File qui est
+    # single-use). A chaque cache hit, on wrappera dans un BytesIO frais.
+    png_bytes = buf.getvalue()
+    _cache_set(guild.id, queue_type, page, png_bytes, total_pages)
+
+    file = discord.File(
+        BytesIO(png_bytes), filename=f"leaderboard_{queue_type}.png",
+    )
 
     if not with_view:
         return file, None
@@ -290,6 +376,14 @@ async def refresh_leaderboard_channel(
     _LAST_REFRESH_AT.move_to_end(key)
     while len(_LAST_REFRESH_AT) > _MAX_GUILDS_TRACKED:
         _LAST_REFRESH_AT.popitem(last=False)
+
+    # ELO a change pour ce (guild, queue_type) ET on va effectivement
+    # rendre une nouvelle page (debounce passe) -> invalide les pages
+    # caches pour eviter de servir des donnees perimees. La page 1
+    # fraichement rendue ci-dessous repeuplera le cache via _cache_set.
+    # Note : si le debounce avait renvoye plus haut, on n'invalide PAS
+    # — le message poste reste l'ancien, donc le cache reste coherent.
+    _cache_invalidate(guild.id, queue_type)
 
     needle = LEADERBOARD_CHANNEL_NAME.lower()
     chan = next(
