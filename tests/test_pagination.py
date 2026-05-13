@@ -128,7 +128,7 @@ def test_chunk_empty_when_out_of_bounds():
 
 
 import mongomock
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 
 @pytest.mark.asyncio
@@ -358,7 +358,7 @@ def test_page_cache_get_promotes_lru_order():
     """Un cache hit doit promouvoir la cle au plus recent (anti-eviction)."""
     from services import leaderboard_refresh
     from services.leaderboard_refresh import (
-        _cache_set, _cache_get, _PAGE_CACHE, _PAGE_CACHE_MAXSIZE,
+        _cache_set, _cache_get, _PAGE_CACHE,
     )
 
     leaderboard_refresh._clear_page_cache_for_tests()

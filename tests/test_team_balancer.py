@@ -6,7 +6,6 @@ import pytest
 
 from services.team_balancer import (
     Player,
-    BalancedTeams,
     balance_teams,
     format_teams,
 )

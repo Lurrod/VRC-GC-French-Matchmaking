@@ -7,11 +7,45 @@ discord.Interaction, on appelle le callback de la commande, et on verifie
 les appels aux methodes Discord.
 
 Pour lancer :
-    pytest test_bot_slash.py -v
+    pytest tests/test_bot_slash.py -v
 """
 
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
-import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+# Apres refactor : les slash commands sont dans cogs/elo_admin.py et
+# cogs/admin.py. Le bot.add_cog n'est pas appele en tests (pas de
+# setup_hook), donc on instancie le cog manuellement et on re-expose
+# ses commandes sur le module `bot` pour preserver les anciens callsites
+# de test (`bot_module.win.callback(inter, ...)`). La signature `callback`
+# d'une commande dans un cog inclut `self`, donc les appels doivent
+# passer l'instance du cog en 1er argument.
+import bot as _bot_module
+from cogs.admin import AdminCog
+from cogs.elo_admin import ELOAdminCog
+
+_elo_cog = ELOAdminCog(_bot_module.bot, _bot_module.db)
+_admin_cog = AdminCog(_bot_module.bot, _bot_module.db)
+
+# Re-expose les commandes du cog sur le module `bot` (avec auto-bind de
+# `self` via une closure) pour eviter de toucher 13 tests.
+class _BoundCommand:
+    def __init__(self, cog, cmd):
+        self._cog = cog
+        self._cmd = cmd
+
+    @property
+    def callback(self):
+        # Wrap pour que `.callback(inter, ...)` lie automatiquement self=cog.
+        async def _bound(*args, **kwargs):
+            return await self._cmd.callback(self._cog, *args, **kwargs)
+        return _bound
+
+
+for _name in ("win", "lose", "leaderboard", "resetelo", "reset_queue",
+              "elomodify", "winmodify", "losemodify", "stats"):
+    setattr(_bot_module, _name, _BoundCommand(_elo_cog, getattr(_elo_cog, _name)))
+for _name in ("map_pick", "coinflip", "clear", "help_cmd", "setup_bot", "bypass"):
+    setattr(_bot_module, _name, _BoundCommand(_admin_cog, getattr(_admin_cog, _name)))
 
 
 def _fake_member(member_id: int, name: str, *, manage_guild: bool = False):
@@ -353,7 +387,7 @@ async def test_slash_resetelo_single_player():
     col.insert_one({"_id": "2:open", "user_id": "2", "queue_type": "open",
                     "name": "Bob", "elo": 999, "wins": 50, "losses": 5})
 
-    await bot_module.resetelo.callback(inter, queue="open", joueur=target, all=False)
+    await bot_module.resetelo.callback(inter, queue="open", joueur=target, all_players=False)
 
     doc = col.find_one({"_id": "2:open"})
     assert doc["elo"] == bot_module.ELO_START
@@ -375,7 +409,7 @@ async def test_slash_resetelo_all_players():
                         "queue_type": "open", "name": t.display_name,
                         "elo": 100, "wins": 5, "losses": 1})
 
-    await bot_module.resetelo.callback(inter, queue="open", joueur=None, all=True)
+    await bot_module.resetelo.callback(inter, queue="open", joueur=None, all_players=True)
 
     for t in targets:
         doc = col.find_one({"_id": f"{t.id}:open"})
@@ -450,6 +484,7 @@ def _fake_guild_with_setup(guild_id: int = 42):
 
 async def test_slash_setup_creates_category_and_channels():
     import bot as bot_module
+    from cogs.admin import SETUP_CATEGORY_NAME, SETUP_CHANNELS
 
     admin = _fake_member(1, "Admin", manage_guild=True)
     guild = _fake_guild_with_setup(42)
@@ -461,10 +496,10 @@ async def test_slash_setup_creates_category_and_channels():
     await bot_module.setup_bot.callback(inter)
 
     # Categorie creee
-    assert any(c.name == bot_module.SETUP_CATEGORY_NAME for c in guild.categories)
+    assert any(c.name == SETUP_CATEGORY_NAME for c in guild.categories)
     # Tous les salons crees
     names = [c.name for c in guild.text_channels]
-    for expected in bot_module.SETUP_CHANNELS:
+    for expected in SETUP_CHANNELS:
         assert expected in names
 
     inter.followup.send.assert_awaited()
@@ -475,15 +510,16 @@ async def test_slash_setup_creates_category_and_channels():
 
 async def test_slash_setup_idempotent_when_channels_exist():
     import bot as bot_module
+    from cogs.admin import SETUP_CATEGORY_NAME, SETUP_CHANNELS
 
     admin = _fake_member(1, "Admin", manage_guild=True)
     guild = _fake_guild_with_setup(42)
 
     # Pre-cree categorie + salons
     cat = MagicMock()
-    cat.name = bot_module.SETUP_CATEGORY_NAME
+    cat.name = SETUP_CATEGORY_NAME
     guild.categories.append(cat)
-    for n in bot_module.SETUP_CHANNELS:
+    for n in SETUP_CHANNELS:
         chan = MagicMock()
         chan.name = n
         chan.id = 555

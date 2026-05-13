@@ -1,0 +1,29 @@
+# Hooks pre-commit pour empecher les commits non-formates / linte's.
+#
+# Installation (1 fois) :
+#   pip install pre-commit
+#   pre-commit install
+#
+# Apres installation, chaque `git commit` declenche ruff + format check.
+# Bypass volontaire : `git commit --no-verify` (a eviter).
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      # Linting : echoue si une erreur ruff bloque (cf. ignore-list dans pyproject.toml).
+      - id: ruff
+        args: ["--fix"]
+      # Format check : refuse les fichiers non formates (auto-fix avec --fix-only).
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]

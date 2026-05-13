@@ -15,11 +15,15 @@ attache de la VoteView, persistance).
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, asdict
-from typing import Iterable, Sequence
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
 from services import elo_calc
-from services.team_balancer import Player, BalancedTeams, balance_teams
+from services.team_balancer import BalancedTeams, Player, balance_teams
+
+if TYPE_CHECKING:
+    import discord
 
 
 @dataclass(frozen=True)
@@ -108,7 +112,7 @@ def find_free_match_category(guild) -> str | None:
     return free[0] if free else None
 
 
-def find_free_match_prep(guild) -> tuple[str, object] | None:
+def find_free_match_prep(guild) -> tuple[str, discord.TextChannel] | None:
     """
     Comme find_free_match_category, mais renvoie aussi le salon
     'match-preparation' contenu dans la categorie libre.

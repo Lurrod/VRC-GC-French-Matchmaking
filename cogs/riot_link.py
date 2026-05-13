@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import discord
 from discord import app_commands
@@ -26,15 +26,15 @@ from discord.ext import commands
 from pymongo.errors import DuplicateKeyError
 
 from services import repository
-
-logger = logging.getLogger(__name__)
-from services.riot_id import parse_riot_id
 from services.riot_api import (
     HenrikDevClient,
-    PlayerNotFound,
-    RateLimited,
+    PlayerNotFoundError,
+    RateLimitedError,
     RiotApiError,
 )
+from services.riot_id import parse_riot_id
+
+logger = logging.getLogger(__name__)
 
 
 # Serveur reserve aux EU
@@ -74,10 +74,10 @@ class RiotLinkCog(commands.Cog):
         try:
             account = await asyncio.to_thread(self.riot_client.get_account, name, tag)
             mmr     = await asyncio.to_thread(self.riot_client.get_current_mmr, region, name, tag)
-        except PlayerNotFound:
+        except PlayerNotFoundError:
             await interaction.followup.send(f"❌ Joueur **{name}#{tag}** introuvable.", ephemeral=True)
             return
-        except RateLimited:
+        except RateLimitedError:
             await interaction.followup.send("⏳ API HenrikDev rate-limited, reessaie dans 1 minute.", ephemeral=True)
             return
         except RiotApiError as e:
@@ -140,7 +140,7 @@ class RiotLinkCog(commands.Cog):
         embed = discord.Embed(
             title="🎯 Compte Riot lie !",
             color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
         embed.add_field(name="Riot ID", value=f"**{name}#{tag}**", inline=True)
         embed.add_field(name="Region", value=region.upper(),       inline=True)

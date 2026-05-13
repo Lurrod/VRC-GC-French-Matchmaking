@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Mapping
+from typing import Final
+from collections.abc import Mapping
 
 from services.riot_api import (
     HenrikDevClient,

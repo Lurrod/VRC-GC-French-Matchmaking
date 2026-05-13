@@ -30,13 +30,14 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from services import repository
+import contextlib
 
 
 # Roles "Match #1", "Match #2", "Match #3", "Match #4", "Match #5" attribues a un joueur en cours
@@ -112,10 +113,8 @@ async def _revoke_queue_role(member: discord.Member) -> None:
     role = discord.utils.get(member.guild.roles, name=QUEUE_ROLE_NAME)
     if role is None or role not in member.roles:
         return
-    try:
+    with contextlib.suppress(discord.Forbidden, discord.HTTPException):
         await member.remove_roles(role, reason="Left queue")
-    except (discord.Forbidden, discord.HTTPException):
-        pass
 
 
 async def _grant_match_role(member: discord.Member, role_name: str) -> None:
@@ -123,20 +122,16 @@ async def _grant_match_role(member: discord.Member, role_name: str) -> None:
     role = discord.utils.get(member.guild.roles, name=role_name)
     if role is None or role in member.roles:
         return
-    try:
+    with contextlib.suppress(discord.Forbidden, discord.HTTPException):
         await member.add_roles(role, reason=f"Match formed in {role_name}")
-    except (discord.Forbidden, discord.HTTPException):
-        pass
 
 
 async def _revoke_match_role(member: discord.Member, role_name: str) -> None:
     role = discord.utils.get(member.guild.roles, name=role_name)
     if role is None or role not in member.roles:
         return
-    try:
+    with contextlib.suppress(discord.Forbidden, discord.HTTPException):
         await member.remove_roles(role, reason="Match ended")
-    except (discord.Forbidden, discord.HTTPException):
-        pass
 
 
 async def _move_to_waiting_room(
@@ -193,7 +188,7 @@ def build_queue_embed(
         title=f"🎮 {label} 10mans — {count}/{QUEUE_SIZE}",
         description=state,
         color=color,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     if players:
@@ -226,9 +221,16 @@ class QueueView(discord.ui.View):
         # OrderedDict + LRU bornee pour eviter une fuite memoire sur bot
         # multi-guilds longue duree (1 Lock par guild_id, jamais purge).
         self._locks: OrderedDict[int, asyncio.Lock] = OrderedDict()
+        # Refs fortes sur les tasks de formation de match (`_safe_on_full`).
+        # Sans ca, Python peut GC la task avant qu'elle finisse
+        # (cf. docs asyncio.create_task : "Save a reference to the result
+        # of this function, to avoid a task disappearing mid-execution").
+        # Le `done_callback` discard l'entree au terme de la task pour
+        # eviter la fuite memoire sur bot longue duree.
+        self._bg_tasks: set[asyncio.Task[None]] = set()
 
         # Boutons a custom_id dynamique (per-instance).
-        join = discord.ui.Button(
+        join: discord.ui.Button = discord.ui.Button(
             label="Rejoindre",
             style=discord.ButtonStyle.success,
             custom_id=f"queue_v2:join:{queue_type}",
@@ -237,7 +239,7 @@ class QueueView(discord.ui.View):
         self.join_btn = join
         self.add_item(join)
 
-        leave = discord.ui.Button(
+        leave: discord.ui.Button = discord.ui.Button(
             label="Quitter",
             style=discord.ButtonStyle.danger,
             custom_id=f"queue_v2:leave:{queue_type}",
@@ -389,7 +391,9 @@ class QueueView(discord.ui.View):
 
         # 8) trigger formation
         if full and self._on_full:
-            asyncio.create_task(self._safe_on_full(inter, queue_doc))
+            task = asyncio.create_task(self._safe_on_full(inter, queue_doc))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
 
     async def _safe_on_full(
         self, inter: discord.Interaction, queue_doc: dict,

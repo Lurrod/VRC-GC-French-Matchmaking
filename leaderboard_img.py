@@ -18,8 +18,10 @@ Format d'entree (par joueur) :
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from io import BytesIO
-from typing import Iterable, Mapping, Any, Sequence
+from typing import Any
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -62,7 +64,6 @@ BRONZE      = (210, 130, 65)
 
 
 # ── Cache avatars ─────────────────────────────────────────────────
-from collections import OrderedDict
 
 # LRU bornee : evite que le cache d'avatars croisse indefiniment
 # (1 entree par url unique, jamais TTL'e). Eviction LRU des qu'on
@@ -102,7 +103,7 @@ def _font(size: int, bold: bool = True):
     for path in candidates:
         try:
             return ImageFont.truetype(path, size)
-        except (OSError, IOError):
+        except OSError:
             continue
     return ImageFont.load_default()
 
@@ -110,17 +111,17 @@ def _font(size: int, bold: bool = True):
 def _text_w(draw: ImageDraw.ImageDraw, text: str, font) -> int:
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[2] - bbox[0]
+        return int(bbox[2] - bbox[0])
     except AttributeError:
-        return font.getsize(text)[0]
+        return int(font.getsize(text)[0])
 
 
 def _text_h(draw: ImageDraw.ImageDraw, text: str, font) -> int:
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[3] - bbox[1]
+        return int(bbox[3] - bbox[1])
     except AttributeError:
-        return font.getsize(text)[1]
+        return int(font.getsize(text)[1])
 
 
 def _draw_v_center(draw, text, x_left, y_center, font, color):
@@ -159,7 +160,7 @@ def _fetch_avatar(url: str | None) -> Image.Image | None:
         if resp.status_code != 200:
             return None
         a = Image.open(BytesIO(resp.content)).convert("RGBA")
-        a = a.resize((AVATAR, AVATAR), Image.LANCZOS)
+        a = a.resize((AVATAR, AVATAR), Image.Resampling.LANCZOS)
         mask = Image.new("L", (AVATAR, AVATAR), 0)
         ImageDraw.Draw(mask).ellipse((0, 0, AVATAR, AVATAR), fill=255)
         a.putalpha(mask)

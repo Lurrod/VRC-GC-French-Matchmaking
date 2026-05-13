@@ -5,8 +5,6 @@ import pytest
 from services import elo_calc, repository
 from services.elo_updater import (
     apply_match_validation,
-    MatchEloOutcome,
-    PlayerEloChange,
 )
 
 

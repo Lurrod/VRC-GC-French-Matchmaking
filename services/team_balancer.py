@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import Iterable, Final
+from typing import Final
+from collections.abc import Iterable
 
 
 TEAM_SIZE:    Final[int] = 5

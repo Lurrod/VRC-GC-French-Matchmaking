@@ -1,0 +1,88 @@
+# Config centralisee : ruff, mypy, pytest.
+# Pas de section [build-system] -- le projet n'est pas packageable
+# (entry point = bot.py via PM2), c'est juste un script + cogs.
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    "__pycache__",
+    ".venv",
+    "venv",
+    "preview_leaderboard.py",  # outil dev jamais lance en prod
+    "seed_users.py",           # outil dev jamais lance en prod
+]
+
+[tool.ruff.lint]
+# Rules activees : style basique + bugbear + simplify + naming + securite
+# + builtins shadow + modernization + return-style + ruff-specific.
+# RUF001/RUF003 (ambiguous unicode) desactives : on garde nos emojis.
+# S101 desactive sur les tests (asserts pytest sont legitimes).
+select = ["E", "F", "W", "B", "C90", "SIM", "N", "A", "UP", "RET", "RUF"]
+ignore = [
+    "E501",      # line too long -- on a black/format
+    "RUF001",    # ambiguous unicode in strings (emojis intentionnels)
+    "RUF003",    # ambiguous unicode in comments
+    "B008",      # mutable default arg (faux positifs sur dpytest fixtures)
+    "C901",      # complexity -- gere separement par radon
+    "RET504",    # unnecessary assignment before return -- style perso
+    "N818",      # exception naming Error suffix -- corrige en masse
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests : on tolere asserts, pseudo-random, imports tardifs (mongomock
+# doit patcher avant l'import de bot), list concat style, semicolons,
+# noms courts (`l` pour len), unused locals (mocks).
+"test_*.py"   = [
+    "S101", "S311", "E402", "E702", "E741",
+    "F841", "RUF005", "RUF059", "RUF043",
+    "SIM103", "SIM118",
+]
+"conftest.py" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+# Pas de --strict pour l'instant : ~180 erreurs a fix. Mode laxiste
+# au debut, on durcira au fur et a mesure des fixes.
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+exclude = [
+    "preview_leaderboard.py",
+    "seed_users.py",
+]
+
+# bot.py + cogs/* : nombreux `interaction.guild_id: int | None` passes
+# a `repository.*` qui attend `int | str`, et `interaction.guild: Guild | None`
+# deref sans garde. En pratique, les slash commands sont guild-only
+# (DMs jamais actives), donc ces None ne fire jamais en runtime.
+# Le refactor bot.py (cogs) eliminera la majorite de ces patterns.
+# En attendant : on tolere `union-attr` et `arg-type` pour eviter
+# le bruit. `assignment` (default None pour param typed Member) tolere
+# aussi pour les commandes prefix legacy.
+[[tool.mypy.overrides]]
+module = ["bot", "cogs.*"]
+disable_error_code = ["union-attr", "arg-type", "assignment", "method-assign"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Permet aux tests d'importer `bot`, `cogs`, `services` depuis la racine
+# sans manipuler sys.path.
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    # discord.utils.get appele sur des mocks iterables produit cette coroutine
+    # non-await. Inoffensif en test (les mocks ne dispatchent pas).
+    "ignore:coroutine '_aget' was never awaited:RuntimeWarning",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

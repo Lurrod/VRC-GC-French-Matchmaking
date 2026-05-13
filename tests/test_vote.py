@@ -1,9 +1,8 @@
 """Tests du systeme de vote (Phase 5)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from cogs.match import (
     MatchCog,
@@ -271,9 +270,9 @@ async def test_timeout_marks_pending_match_contested():
 
     # Crée un match expiré (au-delà du timeout)
     match_id = _seed_match(bot_module.db)
-    bot_module.db[f"matches_42"].update_one(
+    bot_module.db["matches_42"].update_one(
         {"_id": match_id},
-        {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5)}},
+        {"$set": {"created_at": datetime.now(UTC) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5)}},
     )
 
     channel = MagicMock()
@@ -304,7 +303,7 @@ async def test_timeout_self_heals_pending_with_majority_a():
     bot_module.db["matches_42"].update_one(
         {"_id": match_id},
         {"$set": {
-            "created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
+            "created_at": datetime.now(UTC) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
             "votes": {str(i): "a" for i in range(MAJORITY_THRESHOLD)},
         }},
     )
@@ -334,7 +333,7 @@ async def test_timeout_self_heals_pending_with_majority_b():
     bot_module.db["matches_42"].update_one(
         {"_id": match_id},
         {"$set": {
-            "created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
+            "created_at": datetime.now(UTC) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
             "votes": {str(i): "b" for i in range(MAJORITY_THRESHOLD)},
         }},
     )
@@ -365,7 +364,7 @@ async def test_timeout_still_marks_contested_when_no_majority():
     bot_module.db["matches_42"].update_one(
         {"_id": match_id},
         {"$set": {
-            "created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
+            "created_at": datetime.now(UTC) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5),
             "votes": split_votes,
         }},
     )
@@ -397,11 +396,11 @@ async def test_timeout_does_not_affect_validated():
     import bot as bot_module
 
     match_id = _seed_match(bot_module.db)
-    bot_module.db[f"matches_42"].update_one(
+    bot_module.db["matches_42"].update_one(
         {"_id": match_id},
         {"$set": {
             "status": "validated_a",
-            "created_at": datetime.now(timezone.utc) - timedelta(minutes=20),
+            "created_at": datetime.now(UTC) - timedelta(minutes=20),
         }},
     )
 
@@ -448,7 +447,7 @@ async def test_timeout_with_injectable_now():
     cog.bot = MagicMock()
     cog.bot.guilds = [guild]
 
-    fake_now = datetime.now(timezone.utc) + timedelta(minutes=VOTE_TIMEOUT_MINUTES + 1)
+    fake_now = datetime.now(UTC) + timedelta(minutes=VOTE_TIMEOUT_MINUTES + 1)
     flagged = await cog.check_vote_timeouts(now=fake_now)
     assert flagged == 1
 
@@ -457,9 +456,9 @@ async def test_timeout_falls_back_when_no_admin_role():
     """Si aucun role 'Admin' n'existe : on ping `@admin` en plain text."""
     import bot as bot_module
     match_id = _seed_match(bot_module.db)
-    bot_module.db[f"matches_42"].update_one(
+    bot_module.db["matches_42"].update_one(
         {"_id": match_id},
-        {"$set": {"created_at": datetime.now(timezone.utc) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5)}},
+        {"$set": {"created_at": datetime.now(UTC) - timedelta(minutes=VOTE_TIMEOUT_MINUTES + 5)}},
     )
 
     channel = MagicMock()
@@ -760,6 +759,6 @@ def test_find_validated_unverified_excludes_elo_applied():
     repository.set_match_status(bot_module.db, 42, match_id, "validated_a")
     repository.claim_match_for_elo(bot_module.db, 42, match_id)
 
-    cutoff = datetime.now(timezone.utc) + timedelta(minutes=1)
+    cutoff = datetime.now(UTC) + timedelta(minutes=1)
     matches = repository.find_validated_unverified(bot_module.db, 42, cutoff)
     assert all(m["_id"] != match_id for m in matches)

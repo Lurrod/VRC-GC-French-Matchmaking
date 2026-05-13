@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 from pymongo import ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
-from pymongo.errors import DuplicateKeyError
+from datetime import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ def get_or_create_player(
     /reset-queue) sans regex sur _id."""
     _check_queue_type(queue_type)
     doc_id = player_doc_id(user_id, queue_type)
-    doc = col.find_one_and_update(
+    return col.find_one_and_update(
         {"_id": doc_id},
         {
             "$set": {"name": display_name},
@@ -129,7 +130,6 @@ def get_or_create_player(
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
-    return doc
 
 
 # ── V2 : comptes Riot lies ───────────────────────────────────────
@@ -170,7 +170,7 @@ def link_riot_account(
     plus qu'a (a) verifier qu'un joueur est lie pour rejoindre la queue,
     (b) afficher le rang Riot de reference.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     get_riot_col(db, guild_id).update_one(
         {"_id": str(user_id)},
         {"$set": {
@@ -180,61 +180,10 @@ def link_riot_account(
             "puuid":         puuid,
             "peak_elo":      peak_elo,
             "source":        source,
-            "fetched_at":    datetime.now(timezone.utc),
+            "fetched_at":    datetime.now(UTC),
         }},
         upsert=True,
     )
-
-
-def seed_elo_with_riot_base(
-    db: Database,
-    guild_id: int | str,
-    user_id: int | str,
-    *,
-    riot_base_elo: int,
-    display_name: str,
-) -> tuple[int, bool]:
-    """Ajoute riot_base_elo a `elo_<guild>.elo`, **une seule fois** par joueur.
-
-    Atomique : protege contre la double comptabilisation si /link-riot est
-    rappele apres /unlink-riot. Le seeding est marque par le flag
-    `linked_once: True` dans le doc joueur.
-
-    Renvoie (elo_final, seeded_now). seeded_now=False si le joueur avait
-    deja ete seede une fois (ELO inchangee).
-    """
-    col = get_elo_col(db, guild_id)
-    uid = str(user_id)
-
-    # 1) Atomique : seed le doc s'il n'est pas encore marque linked_once.
-    # Couvre deux cas en une seule operation :
-    #   - Doc existant non seede : $inc applique le seed
-    #   - Doc absent : upsert cree un doc neuf avec elo = riot_base_elo
-    # Si le doc existe deja avec linked_once=True, le filtre echoue et
-    # l'upsert leve DuplicateKeyError (gere ci-dessous).
-    try:
-        res = col.find_one_and_update(
-            {"_id": uid, "linked_once": {"$ne": True}},
-            {
-                "$inc": {"elo": int(riot_base_elo)},
-                "$set": {"name": display_name, "linked_once": True},
-                "$setOnInsert": {"wins": 0, "losses": 0},
-            },
-            upsert=True,
-            return_document=ReturnDocument.AFTER,
-        )
-        if res is not None:
-            return int(res["elo"]), True
-    except DuplicateKeyError:
-        pass  # Doc existe deja avec linked_once=True : on tombe en branche 2
-
-    # 2) Deja seede : ELO inchangee, on rafraichit juste le display_name
-    after = col.find_one_and_update(
-        {"_id": uid},
-        {"$set": {"name": display_name}},
-        return_document=ReturnDocument.AFTER,
-    )
-    return (int(after["elo"]) if after else 0), False
 
 
 def get_riot_account(db: Database, guild_id: int | str, user_id: int | str) -> Mapping[str, Any] | None:
@@ -269,7 +218,7 @@ def setup_active_queue(
 ) -> None:
     """Cree (ou remplace) la queue active de ce type pour ce guild."""
     _check_queue_type(queue_type)
-    from datetime import datetime, timezone
+    from datetime import datetime
     get_queue_col(db, guild_id).update_one(
         {"_id": active_queue_id(queue_type)},
         {"$set": {
@@ -278,7 +227,7 @@ def setup_active_queue(
             "players":    [],
             "status":     "open",
             "queue_type": queue_type,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
         }},
         upsert=True,
     )
@@ -415,8 +364,8 @@ def create_match(
     pour permettre les filtres par type (leaderboard refresh, /reset-queue,
     Pro Queue Henrik skip)."""
     _check_queue_type(queue_type)
-    from datetime import datetime, timezone
-    doc = {
+    from datetime import datetime
+    doc: dict[str, Any] = {
         "team_a":          team_a,
         "team_b":          team_b,
         "map":             map_name,
@@ -425,7 +374,7 @@ def create_match(
         "category_name":   category_name,
         "status":          "pending",
         "votes":           {},
-        "created_at":      datetime.now(timezone.utc),
+        "created_at":      datetime.now(UTC),
         "validated_at":    None,
         "message_id":      int(message_id) if message_id else None,
         "channel_id":      int(channel_id) if channel_id else None,
@@ -470,10 +419,10 @@ def set_match_status(
     match_id: Any,
     status: str,
 ) -> None:
-    from datetime import datetime, timezone
-    update = {"status": status}
+    from datetime import datetime
+    update: dict[str, Any] = {"status": status}
     if status in ("validated_a", "validated_b"):
-        update["validated_at"] = datetime.now(timezone.utc)
+        update["validated_at"] = datetime.now(UTC)
     get_matches_col(db, guild_id).update_one({"_id": match_id}, {"$set": update})
 
 
@@ -494,10 +443,10 @@ def transition_match_status(
     parametre `validated_at` permet d'override la valeur (utilise par
     l'auto-reparation de `check_vote_timeouts` pour referencer le moment
     ou la majorite a ete reellement atteinte plutot que `now`)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     update: dict[str, Any] = {"status": to_status}
     if to_status in ("validated_a", "validated_b"):
-        update["validated_at"] = validated_at or datetime.now(timezone.utc)
+        update["validated_at"] = validated_at or datetime.now(UTC)
     return get_matches_col(db, guild_id).find_one_and_update(
         {"_id": match_id, "status": from_status},
         {"$set": update},
@@ -518,7 +467,7 @@ def claim_match_for_elo(
     Returns:
         Le doc apres claim si on a bien obtenu le verrou, None si deja claime.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     return get_matches_col(db, guild_id).find_one_and_update(
         {
             "_id":         match_id,
@@ -527,7 +476,7 @@ def claim_match_for_elo(
         },
         {"$set": {
             "elo_applied":    True,
-            "elo_applied_at": datetime.now(timezone.utc),
+            "elo_applied_at": datetime.now(UTC),
         }},
         return_document=ReturnDocument.AFTER,
     )
@@ -641,14 +590,14 @@ def register_application(
 ) -> None:
     """Enregistre une candidature en etat `pending`. `_id` est le message
     Discord (qui porte les boutons accept/refuse). Idempotent via $setOnInsert."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     get_applications_col(db, guild_id).update_one(
         {"_id": str(message_id)},
         {"$setOnInsert": {
             "applicant_id": str(applicant_id),
             "is_staff":     bool(is_staff),
             "status":       "pending",
-            "created_at":   datetime.now(timezone.utc),
+            "created_at":   datetime.now(UTC),
         }},
         upsert=True,
     )
@@ -666,7 +615,7 @@ def claim_application_decision(
     `accepted` ou `refused`. Renvoie True si on a obtenu la decision,
     False si un autre admin a deja decide (evite double-traitement :
     role grant + kick concurrents, double DM, etc.)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     if status not in ("accepted", "refused"):
         raise ValueError(f"status invalide : {status}")
     res = get_applications_col(db, guild_id).update_one(
@@ -674,7 +623,7 @@ def claim_application_decision(
         {"$set": {
             "status":      status,
             "decided_by":  str(decided_by),
-            "decided_at":  datetime.now(timezone.utc),
+            "decided_at":  datetime.now(UTC),
         }},
     )
     return res.modified_count == 1

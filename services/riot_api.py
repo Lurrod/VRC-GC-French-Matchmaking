@@ -18,7 +18,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any, Final
 from urllib.parse import quote
 
@@ -39,11 +39,11 @@ class RiotApiError(Exception):
     """Erreur generique du client."""
 
 
-class PlayerNotFound(RiotApiError):
+class PlayerNotFoundError(RiotApiError):
     """Pseudo#tag inexistant cote Riot."""
 
 
-class RateLimited(RiotApiError):
+class RateLimitedError(RiotApiError):
     """API a renvoye 429."""
 
 
@@ -179,9 +179,9 @@ class HenrikDevClient:
                 raise RiotApiError(f"Erreur reseau apres {RETRY_ATTEMPTS} tentatives : {e}") from e
 
             if resp.status_code == 404:
-                raise PlayerNotFound(f"Joueur introuvable : {path}")
+                raise PlayerNotFoundError(f"Joueur introuvable : {path}")
             if resp.status_code == 429:
-                raise RateLimited("HenrikDev a renvoye 429 (rate limited)")
+                raise RateLimitedError("HenrikDev a renvoye 429 (rate limited)")
             if 500 <= resp.status_code < 600:
                 last_err = RiotApiError(f"HTTP {resp.status_code} : {resp.text[:200]}")
                 if attempt < RETRY_ATTEMPTS - 1:
@@ -251,7 +251,7 @@ class HenrikDevClient:
             out.append(HistoricalMatch(
                 elo=int(entry.get("elo") or 0),
                 tier=int(entry.get("currenttier") or 0),
-                date=datetime.fromtimestamp(int(ts), tz=timezone.utc),
+                date=datetime.fromtimestamp(int(ts), tz=UTC),
                 mmr_change=int(entry.get("mmr_change_to_last_game") or 0),
             ))
         return out
@@ -304,7 +304,7 @@ def _parse_match(entry: dict) -> MatchSummary:
     players = (entry.get("players", {}) or {}).get("all_players", []) or []
 
     started_raw = meta.get("game_start") or 0
-    started_at  = datetime.fromtimestamp(int(started_raw), tz=timezone.utc)
+    started_at  = datetime.fromtimestamp(int(started_raw), tz=UTC)
 
     parsed_players: list[MatchPlayerStats] = []
     for p in players:

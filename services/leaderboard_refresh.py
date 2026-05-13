@@ -16,9 +16,8 @@ import logging
 import asyncio
 import re
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from io import BytesIO
-from typing import Optional, Tuple
 
 import discord
 
@@ -40,7 +39,7 @@ _REFRESH_DEBOUNCE_SECONDS: int = 30
 # nombreuses guilds (entree par guild_id, jamais purgee). LRU avec
 # eviction FIFO du plus ancien acces au-dela de _MAX_GUILDS_TRACKED.
 _MAX_GUILDS_TRACKED: int = 1024
-_LAST_REFRESH_AT: "OrderedDict[tuple[int, str], datetime]" = OrderedDict()
+_LAST_REFRESH_AT: OrderedDict[tuple[int, str], datetime] = OrderedDict()
 
 # ── Cache des pages rendues ───────────────────────────────────────
 # Cache lazy : la page est rendue a la 1ere consultation et stockee
@@ -55,7 +54,7 @@ _LAST_REFRESH_AT: "OrderedDict[tuple[int, str], datetime]" = OrderedDict()
 # Cle  : (guild_id, queue_type, page_zero_indexed)
 # Val  : (png_bytes, total_pages_at_render_time)
 _PAGE_CACHE_MAXSIZE: int = 60   # ~3 queues * 20 pages worst case
-_PAGE_CACHE: "OrderedDict[tuple[int, str, int], tuple[bytes, int]]" = OrderedDict()
+_PAGE_CACHE: OrderedDict[tuple[int, str, int], tuple[bytes, int]] = OrderedDict()
 
 
 def _cache_get(guild_id: int, queue_type: str, page: int) -> tuple[bytes, int] | None:
@@ -123,7 +122,7 @@ class LeaderboardView(discord.ui.View):
         self, *,
         page: int = 0,
         total_pages: int = 1,
-        queue_type: Optional[str] = None,
+        queue_type: str | None = None,
     ):
         super().__init__(timeout=None)
         self.page = page
@@ -139,13 +138,13 @@ class LeaderboardView(discord.ui.View):
         self.page_btn.label    = f"Page {self.page + 1} / {self.total_pages}"
 
     @staticmethod
-    def _recover_state(message) -> Tuple[Optional[str], int, int]:
+    def _recover_state(message) -> tuple[str | None, int, int]:
         """Reconstitue (queue_type, page_zero_indexee, total_pages) depuis un message.
 
         Robuste aux mocks et messages incomplets : retourne (None, 0, 1) si
         rien d'exploitable n'est trouve.
         """
-        qt: Optional[str] = None
+        qt: str | None = None
         attachments = getattr(message, "attachments", None)
         if isinstance(attachments, (list, tuple)):
             for att in attachments:
@@ -270,7 +269,7 @@ async def build_leaderboard_payload(
     with_view: bool = True,
     view_timeout: float | None = None,   # conserve pour back-compat, ignore (vue toujours persistante)
     page: int = 0,
-) -> Tuple[Optional[discord.File], Optional[discord.ui.View]]:
+) -> tuple[discord.File | None, discord.ui.View | None]:
     """Genere file/view pour le leaderboard du queue_type donne, page `page`.
 
     Utilise un cache lazy (cf. `_PAGE_CACHE`) pour eviter de re-rendre
@@ -360,13 +359,13 @@ async def build_leaderboard_payload(
 
 
 async def refresh_leaderboard_channel(
-    guild: discord.Guild, db, bot_user_id: int, queue_type: str,
+    guild: discord.Guild, db, queue_type: str,
 ) -> None:
     """Refresh le leaderboard du queue_type donne dans #leaderboard.
 
     Per-queue debounce : une rafale Pro ne bloque pas un refresh Open."""
     repository._check_queue_type(queue_type)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     key = (guild.id, queue_type)
     last = _LAST_REFRESH_AT.get(key)
     if last is not None and (now - last).total_seconds() < _REFRESH_DEBOUNCE_SECONDS:
@@ -418,7 +417,10 @@ async def refresh_leaderboard_channel(
         return
 
     try:
-        new_msg = await chan.send(file=file, view=view)
+        if view is None:
+            new_msg = await chan.send(file=file)
+        else:
+            new_msg = await chan.send(file=file, view=view)
     except Exception:
         logger.exception("leaderboard_refresh exception")
         return

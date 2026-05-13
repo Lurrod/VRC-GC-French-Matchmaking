@@ -3,15 +3,15 @@ Tests du client HenrikDev avec mocks de requests.Session.
 On NE fait JAMAIS d'appel reseau reel ici.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from unittest.mock import MagicMock
 
 import pytest
 
 from services.riot_api import (
     HenrikDevClient,
-    PlayerNotFound,
-    RateLimited,
+    PlayerNotFoundError,
+    RateLimitedError,
     RiotApiError,
     VALID_REGIONS,
 )
@@ -49,14 +49,14 @@ def test_get_account_returns_parsed_data():
 def test_get_account_404_raises_player_not_found():
     session = _make_session(_mock_response(404, text="Not Found"))
     client = HenrikDevClient(session=session)
-    with pytest.raises(PlayerNotFound):
+    with pytest.raises(PlayerNotFoundError):
         client.get_account("Ghost", "404")
 
 
 def test_get_account_429_raises_rate_limited():
     session = _make_session(_mock_response(429))
     client = HenrikDevClient(session=session)
-    with pytest.raises(RateLimited):
+    with pytest.raises(RateLimitedError):
         client.get_account("X", "1")
 
 
@@ -128,7 +128,7 @@ def test_get_mmr_history_parses_entries():
     assert len(history) == 2
     assert history[0].elo == 2080
     assert history[0].tier == 24
-    assert history[0].date == datetime.fromtimestamp(1750_000_000, tz=timezone.utc)
+    assert history[0].date == datetime.fromtimestamp(1750_000_000, tz=UTC)
     assert history[1].mmr_change == 15
 
 

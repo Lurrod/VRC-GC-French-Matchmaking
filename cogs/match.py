@@ -21,26 +21,44 @@ Vote :
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import random
-from datetime import datetime, timedelta, timezone
-from typing import Any, Final, Mapping
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-import asyncio
-
-logger = logging.getLogger(__name__)
-
 from cogs.queue_v2 import (
+    QUEUE_CHANNEL_NAMES,
+    QUEUE_LABELS,
     _grant_match_role,
     _revoke_match_role,
     _revoke_queue_role,
-    QUEUE_CHANNEL_NAMES,
-    QUEUE_LABELS,
 )
+from services import elo_calc, repository
+from services.elo_updater import (
+    MatchEloOutcome,
+    apply_match_validation,
+)
+from services.leaderboard_refresh import refresh_leaderboard_channel
+from services.match_service import (
+    build_players,
+    find_free_match_prep,
+    plan_match,
+    serialize_team,
+)
+from services.match_verifier import (
+    compute_acs_multipliers,
+    find_henrik_custom_match,
+)
+from services.riot_api import HenrikDevClient
+
+logger = logging.getLogger(__name__)
 
 MATCH_ROLE_CLEANUP_DELAY_SECONDS: Final[int] = 0  # immediat (etait 60s) — le role
 # Match #N est retire des le vote valide, pour que les joueurs puissent
@@ -53,26 +71,6 @@ MATCH_ROLE_CLEANUP_DELAY_SECONDS: Final[int] = 0  # immediat (etait 60s) — le 
 MAX_REPLACE_ELO_DIFF: Final[int] = 500
 MATCH_HOST_ROLE_NAME: Final[str]              = "Match Host"
 MATCH_HOST_CLEANUP_DELAY_SECONDS: Final[int]  = 600  # 10 min apres validation
-
-from services import elo_calc, repository
-from services.elo_updater import (
-    apply_match_validation,
-    MatchEloOutcome,
-)
-from services.leaderboard_refresh import refresh_leaderboard_channel
-from services.match_verifier import (
-    find_henrik_custom_match,
-    compute_acs_multipliers,
-)
-from services.riot_api import HenrikDevClient
-from services.match_service import (
-    build_players,
-    plan_match,
-    serialize_team,
-    find_free_match_category,
-    find_free_match_prep,
-)
-
 
 VOTE_A_BTN_ID:    Final[str] = "vote_v2:a"
 VOTE_B_BTN_ID:    Final[str] = "vote_v2:b"
@@ -105,7 +103,7 @@ def build_match_embed(
         title=f"🎯 [{qt_label}] Match trouve !",
         description=f"**Map :** {map_name}\n**Lobby host :** <@{leader.id}> ({leader.name})",
         color=0x5865f2,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     a_lines = "\n".join(f"• <@{p.id}> ({p.elo})" for p in teams.team_a)
@@ -171,7 +169,7 @@ def build_match_embed_from_doc(doc: dict, guild_name: str) -> discord.Embed:
         title, color, footer_extra = f"🎯 {qt_prefix}Match termine - Reportez le vainqueur", 0x5865f2, "Cliquez sur l'equipe qui a remporte la partie"
 
     embed = discord.Embed(
-        title=title, color=color, timestamp=datetime.now(timezone.utc),
+        title=title, color=color, timestamp=datetime.now(UTC),
         description=f"**Map :** {map_name}\n**Lobby host :** <@{leader_id}> ({leader_name})",
     )
 
@@ -228,7 +226,7 @@ def build_elo_changes_embed(outcome: MatchEloOutcome, match_doc: dict, guild_nam
             f"{desc_extra}"
         ),
         color=color,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     winners = [c for c in outcome.changes if c.win]
@@ -347,7 +345,7 @@ class VoteView(discord.ui.View):
         if transitioned_doc is not None and self.on_validated:
             try:
                 await self.on_validated(inter, transitioned_doc)
-            except Exception as e:
+            except Exception:
                 logger.exception("[vote] on_validated a leve")
 
     @discord.ui.button(
@@ -582,8 +580,8 @@ class MatchCog(commands.Cog):
         queue_cog = self.bot.get_cog("QueueCog")
         if queue_cog is not None:
             try:
-                await queue_cog.post_queue_message(target_channel, queue_type)
-            except Exception as e:
+                await queue_cog.post_queue_message(target_channel, queue_type)  # type: ignore[attr-defined]
+            except Exception:
                 logger.exception("[match] echec re-post setup-queue")
         return match_id
 
@@ -619,12 +617,10 @@ class MatchCog(commands.Cog):
                 return
             if voice.channel.id == waiting_match.id:
                 return
-            try:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await member.move_to(
                     waiting_match, reason="Match forme : regroupement VC",
                 )
-            except (discord.Forbidden, discord.HTTPException):
-                pass
 
         await asyncio.gather(
             *(_move_one(uid) for uid in player_ids),
@@ -644,7 +640,7 @@ class MatchCog(commands.Cog):
                 await channel.send(
                     f"⚠️ {reason} Une nouvelle queue a ete reposee.",
                 )
-        except Exception as e:
+        except Exception:
             logger.exception("[match] _fail send a leve")
         # Repose une queue fraiche pour eviter d'obliger l'admin a refaire
         # /setup-queue manuellement apres chaque echec de formation.
@@ -652,8 +648,8 @@ class MatchCog(commands.Cog):
             queue_cog = self.bot.get_cog("QueueCog")
             if queue_cog is not None:
                 try:
-                    await queue_cog.post_queue_message(channel, queue_type)
-                except Exception as e:
+                    await queue_cog.post_queue_message(channel, queue_type)  # type: ignore[attr-defined]
+                except Exception:
                     logger.exception("[match] _fail re-post queue a leve")
 
     # ── Hook : vote valide ───────────────────────────────────────
@@ -676,7 +672,7 @@ class MatchCog(commands.Cog):
         # du bot (les anciens `asyncio.create_task` etaient perdus si le
         # bot crashait dans la fenetre de 60s/600s).
         if guild is not None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             try:
                 await asyncio.to_thread(
                     repository.schedule_role_cleanups,
@@ -684,7 +680,7 @@ class MatchCog(commands.Cog):
                     match_role_at=now + timedelta(seconds=MATCH_ROLE_CLEANUP_DELAY_SECONDS),
                     host_role_at=now + timedelta(seconds=MATCH_HOST_CLEANUP_DELAY_SECONDS),
                 )
-            except Exception as e:
+            except Exception:
                 logger.exception("[match] schedule role cleanups a leve")
 
             # Revoke immediat du role Match #N : les joueurs peuvent
@@ -704,7 +700,7 @@ class MatchCog(commands.Cog):
             elo_log_channel = discord.utils.get(
                 guild.text_channels, name="elo-adding",
             )
-        except Exception as e:
+        except Exception:
             logger.exception("[match] lookup elo-adding a leve")
             return
         if elo_log_channel is None:
@@ -760,7 +756,7 @@ class MatchCog(commands.Cog):
         Reprend automatiquement les cleanups perdus suite a un redemarrage
         du bot. Le claim atomique evite les double-traitements en cas de
         ticks concurrents."""
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         # Parallelisation per-guild : meme principe que les autres loops.
         results = await asyncio.gather(
             *[self._process_role_cleanups_for_guild(g, now) for g in self.bot.guilds],
@@ -768,7 +764,7 @@ class MatchCog(commands.Cog):
         )
         processed = 0
         for r in results:
-            if isinstance(r, Exception):
+            if isinstance(r, BaseException):
                 logger.info(f"[match] _process_role_cleanups (guild) a leve : {r!r}")
                 continue
             processed += r
@@ -832,7 +828,7 @@ class MatchCog(commands.Cog):
         Returns:
             nombre de matches passes en `contested` cet appel
         """
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         cutoff = now - timedelta(minutes=VOTE_TIMEOUT_MINUTES)
 
         # Traitement parallelise par guild : sur N guilds, l'execution
@@ -845,7 +841,7 @@ class MatchCog(commands.Cog):
         )
         flagged = 0
         for r in results:
-            if isinstance(r, Exception):
+            if isinstance(r, BaseException):
                 logger.info(f"[match] check_vote_timeouts (guild) a leve : {r!r}")
                 continue
             flagged += r
@@ -856,12 +852,12 @@ class MatchCog(commands.Cog):
         col = repository.get_matches_col(self.db, guild.id)
         # Scan en thread : `find().toList()` est bloquant et peut iterer
         # sur N matches, gelant l'event loop Discord.
-        stale = await asyncio.to_thread(
-            lambda c=col: list(c.find({
+        def _fetch_stale() -> list[Mapping[str, Any]]:
+            return list(col.find({
                 "status":     "pending",
                 "created_at": {"$lt": cutoff},
-            })),
-        )
+            }))
+        stale = await asyncio.to_thread(_fetch_stale)
         for match in stale:
             # Re-fetch atomique juste avant la transition pour eviter
             # une race avec un vote qui franchirait le seuil entre le
@@ -966,7 +962,7 @@ class MatchCog(commands.Cog):
                 f"sans {MAJORITY_THRESHOLD}/10). Score actuel : Team A `{count_a}` / Team B `{count_b}`. "
                 f"Validation manuelle requise.",
             )
-        except Exception as e:
+        except Exception:
             logger.exception("[match] _handle_timeout send a leve")
 
     # ── Verification HenrikDev + application ELO unique ──────────
@@ -980,7 +976,7 @@ class MatchCog(commands.Cog):
           - si on a depasse HENRIK_VERIFY_TIMEOUT_MINUTES : applique ELO plat
             et marque le match comme verifie (abandon Henrik)
         Retourne le nombre de matches traites."""
-        now    = now or datetime.now(timezone.utc)
+        now    = now or datetime.now(UTC)
         start_cutoff   = now - timedelta(minutes=HENRIK_VERIFY_DELAY_MINUTES)
         timeout_cutoff = now - timedelta(minutes=HENRIK_VERIFY_TIMEOUT_MINUTES)
 
@@ -994,7 +990,7 @@ class MatchCog(commands.Cog):
         )
         processed = 0
         for r in results:
-            if isinstance(r, Exception):
+            if isinstance(r, BaseException):
                 logger.info(f"[match] check_henrik_verifications (guild) a leve : {r!r}")
                 continue
             processed += r
@@ -1016,7 +1012,7 @@ class MatchCog(commands.Cog):
             )
             try:
                 await self._verify_match(guild, match, force_apply=timed_out)
-            except Exception as e:
+            except Exception:
                 logger.exception("[match] verify_match a leve")
             processed += 1
         return processed
@@ -1065,7 +1061,7 @@ class MatchCog(commands.Cog):
                 apply_match_validation,
                 self.db, guild.id, match_doc, multipliers=multipliers,
             )
-        except Exception as e:
+        except Exception:
             logger.exception("[match] apply_match_validation a leve")
             # Rollback du claim pour permettre un retry au prochain tick.
             await asyncio.to_thread(
@@ -1085,17 +1081,13 @@ class MatchCog(commands.Cog):
         if elo_log is not None:
             try:
                 await elo_log.send(embed=embed)
-            except Exception as e:
+            except Exception:
                 logger.exception("[match] envoi recap ELO a leve")
 
-        bot_user = self.bot.user
-        if bot_user is not None:
-            try:
-                await refresh_leaderboard_channel(
-                    guild, self.db, bot_user.id, queue_type,
-                )
-            except Exception as e:
-                logger.exception("[match] refresh leaderboard a leve")
+        try:
+            await refresh_leaderboard_channel(guild, self.db, queue_type)
+        except Exception:
+            logger.exception("[match] refresh leaderboard a leve")
 
     async def _fetch_henrik_multipliers(
         self, guild, match_doc: dict,
@@ -1148,7 +1140,7 @@ class MatchCog(commands.Cog):
         # ThreadPoolExecutor et faisant overlap les ticks.
         # Lecture serialisee : sans le lock, plusieurs guilds en
         # parallele pouvaient observer un etat intermediaire (cf #17).
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with self._henrik_lock:
             circuit_open = (
                 self._henrik_circuit_open_until is not None
@@ -1232,15 +1224,15 @@ class MatchCog(commands.Cog):
     async def _timeout_loop(self):
         try:
             await self.check_vote_timeouts()
-        except Exception as e:
+        except Exception:
             logger.exception("[match] check_vote_timeouts a leve")
         try:
             await self.check_henrik_verifications()
-        except Exception as e:
+        except Exception:
             logger.exception("[match] check_henrik_verifications a leve")
         try:
             await self._process_role_cleanups()
-        except Exception as e:
+        except Exception:
             logger.exception("[match] _process_role_cleanups a leve")
 
     @_timeout_loop.before_loop
@@ -1262,7 +1254,7 @@ class MatchCog(commands.Cog):
         )
         try:
             self._timeout_loop.restart()
-        except Exception as e:
+        except Exception:
             logger.exception("[match] _timeout_loop.restart() a leve")
 
     # ── Slash commands admin (cancel / replace) ─────────────────
@@ -1313,7 +1305,7 @@ class MatchCog(commands.Cog):
             if msg_id and interaction.channel:
                 msg = await interaction.channel.fetch_message(int(msg_id))
                 await msg.edit(view=None)
-        except Exception as e:
+        except Exception:
             logger.exception("[match-cancel] retrait view a leve")
 
         await interaction.followup.send(

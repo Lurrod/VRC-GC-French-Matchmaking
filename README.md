@@ -287,7 +287,7 @@ Le bot doit avoir : `Voir les salons`, `Envoyer des messages`, `Intégrer des li
 
 ### Commandes prefix (legacy)
 
-`!leaderboard`, `!stats`, `!win`, `!lose`, `!map`, `!resetelo` — comportement équivalent
+`!leaderboard`, `!stats`, `!win`, `!lose`, `!map` — comportement équivalent
 aux slash mais avec syntaxe prefix. Conservées pour compat ascendante.
 
 ---

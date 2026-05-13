@@ -3,7 +3,6 @@
 import random
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from cogs.match import MatchCog, VoteView, build_match_embed, VOTE_A_BTN_ID, VOTE_B_BTN_ID
 from services import repository
@@ -457,7 +456,7 @@ async def test_on_queue_full_passes_queue_type_to_create_match(monkeypatch):
 # ── build_match_embed ─────────────────────────────────────────────
 def test_build_match_embed_shows_all_players_and_map():
     from services.match_service import MatchPlan
-    from services.team_balancer import balance_teams, Player
+    from services.team_balancer import balance_teams
 
     players = [Player(id=i, name=f"P{i}", elo=1500 + i*50) for i in range(10)]
     teams = balance_teams(players)

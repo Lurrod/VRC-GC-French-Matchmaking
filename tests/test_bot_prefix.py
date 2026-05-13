@@ -13,7 +13,6 @@ Pour lancer :
 
 import discord
 import discord.ext.test as dpytest
-import pytest
 
 
 # ── !leaderboard ──────────────────────────────────────────────────
@@ -49,7 +48,7 @@ async def test_leaderboard_orders_by_elo_desc(discord_bot, fake_guild):
 
     members = fake_guild.members[:3]
     elos    = [50, 200, 100]
-    for m, e in zip(members, elos):
+    for m, e in zip(members, elos, strict=True):
         col.insert_one({"_id": str(m.id), "name": m.display_name, "elo": e, "wins": 0, "losses": 0})
 
     await dpytest.message("!leaderboard")
@@ -65,7 +64,7 @@ async def test_leaderboard_orders_by_elo_desc(discord_bot, fake_guild):
 
 # ── !stats ────────────────────────────────────────────────────────
 async def test_stats_for_unknown_player(discord_bot, fake_member):
-    await dpytest.message(f"!stats")
+    await dpytest.message("!stats")
     assert dpytest.verify().message().contains().content("n'a pas encore joue")
 
 

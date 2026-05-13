@@ -9,7 +9,6 @@ On en profite pour :
 """
 
 import os
-import sys
 from unittest.mock import patch
 
 import mongomock
@@ -51,13 +50,19 @@ async def discord_bot():
       - 1 channel texte "general"
       - 3 membres (TestUser0, TestUser1, TestUser2)
     """
-    import discord
     import discord.ext.test as dpytest
     import bot as bot_module
 
     # discord.py 2.x : le loop n'est pas defini avant setup_hook.
     # On le force ici pour que dpytest puisse dispatcher des events.
     await bot_module.bot._async_setup_hook()
+    # _async_setup_hook ne declenche pas setup_hook lui-meme (login
+    # uniquement). En tests, on appelle setup_hook explicitement pour
+    # charger tous les cogs (sinon /commande et !commande sont
+    # introuvables pour dpytest car les @app_commands.command et
+    # @commands.command vivent maintenant dans des cogs).
+    if not bot_module.bot.cogs:
+        await bot_module.setup_hook()
 
     dpytest.configure(
         bot_module.bot,

@@ -1,16 +1,14 @@
 """Tests du cog riot_link : /link-riot, /unlink-riot, /refresh-elo."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from services.riot_api import (
     Account,
     CurrentMMR,
-    HistoricalMatch,
-    PlayerNotFound,
-    RateLimited,
+    PlayerNotFoundError,
+    RateLimitedError,
 )
 from cogs.riot_link import RiotLinkCog
 
@@ -48,7 +46,7 @@ def _fake_riot_client(*, account=None, mmr=None, history=None, raises=None):
 
 
 def _now() -> datetime:
-    return datetime(2026, 4, 25, tzinfo=timezone.utc)
+    return datetime(2026, 4, 25, tzinfo=UTC)
 
 
 # ── /link-riot ────────────────────────────────────────────────────
@@ -69,7 +67,7 @@ async def test_link_riot_invalid_format():
 
 async def test_link_riot_player_not_found():
     import bot as bot_module
-    client = _fake_riot_client(raises=PlayerNotFound("nope"))
+    client = _fake_riot_client(raises=PlayerNotFoundError("nope"))
     cog = RiotLinkCog(bot_module.bot, bot_module.db, client)
 
     user  = _fake_member(1)
@@ -85,7 +83,7 @@ async def test_link_riot_player_not_found():
 
 async def test_link_riot_rate_limited():
     import bot as bot_module
-    cog = RiotLinkCog(bot_module.bot, bot_module.db, _fake_riot_client(raises=RateLimited()))
+    cog = RiotLinkCog(bot_module.bot, bot_module.db, _fake_riot_client(raises=RateLimitedError()))
 
     inter = _fake_interaction(_fake_member(1))
     await cog.link_riot.callback(cog, inter, riot_id="X#1")

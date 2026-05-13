@@ -89,7 +89,7 @@ def apply_match_validation(
     if queue_type == "pro":
         # Pro Queue : flat 16, multipliers ignores.
         base_gain = base_loss = FLAT_FALLBACK_ELO_CHANGE
-        mults = {}
+        mults: dict[str, float] = {}
         weighted = False
     elif multipliers is None:
         base_gain = base_loss = FLAT_FALLBACK_ELO_CHANGE
@@ -105,8 +105,8 @@ def apply_match_validation(
     winner_mults = [float(mults.get(str(p["id"]), 1.0)) for p in winners]
     loser_mults  = [float(mults.get(str(p["id"]), 1.0)) for p in losers]
 
-    winner_deltas = [int(round(+base_gain * m)) for m in winner_mults]
-    loser_deltas  = [int(round(-base_loss * (2.0 - m))) for m in loser_mults]
+    winner_deltas = [round(+base_gain * m) for m in winner_mults]
+    loser_deltas  = [round(-base_loss * (2.0 - m)) for m in loser_mults]
 
     # Clamp a 0 ELO pour les perdants (compound _id pour le lookup).
     loser_old_elos: list[int] = []
@@ -118,17 +118,17 @@ def apply_match_validation(
             int(doc.get("elo", elo_calc.ELO_START)) if doc else elo_calc.ELO_START
         )
     clamped_loser_deltas = [
-        max(-old, delta) for old, delta in zip(loser_old_elos, loser_deltas)
+        max(-old, delta) for old, delta in zip(loser_old_elos, loser_deltas, strict=True)
     ]
 
     match_id = match_doc.get("_id")
     changes: list[PlayerEloChange] = []
-    for p, delta, mult in zip(winners, winner_deltas, winner_mults):
+    for p, delta, mult in zip(winners, winner_deltas, winner_mults, strict=True):
         changes.append(_apply_player(
             elo_col, p, queue_type=queue_type, match_id=match_id,
             delta=delta, win=True, multiplier=mult,
         ))
-    for p, delta, mult in zip(losers, clamped_loser_deltas, loser_mults):
+    for p, delta, mult in zip(losers, clamped_loser_deltas, loser_mults, strict=True):
         changes.append(_apply_player(
             elo_col, p, queue_type=queue_type, match_id=match_id,
             delta=delta, win=False, multiplier=mult,
