@@ -36,6 +36,7 @@ from discord.ext import commands, tasks
 from cogs.queue_v2 import (
     QUEUE_CHANNEL_NAMES,
     QUEUE_LABELS,
+    QUEUE_ROLE_NAME,
     _grant_match_role,
     _revoke_match_role,
     _revoke_queue_role,
@@ -383,6 +384,11 @@ class MatchCog(commands.Cog):
         self._henrik_consecutive_failures: int = 0
         self._henrik_circuit_open_until: datetime | None = None
         self._henrik_lock: asyncio.Lock = asyncio.Lock()
+        # Garde-fou rate limit Discord pour les ops de roles/voice.
+        # Discord plafonne le bucket per-guild (PATCH /members/{u}) a ~10/10s ;
+        # on cap a 5 concurrents pour ne jamais saturer (formation match
+        # = 10 joueurs simultanes sinon 429 + retry de ~9s).
+        self._guild_member_edit_sem: asyncio.Semaphore = asyncio.Semaphore(5)
 
     # ── Branchement queue full ───────────────────────────────────
     async def on_queue_full(
@@ -493,19 +499,40 @@ class MatchCog(commands.Cog):
         # laisse roles partiels mais le match doc existe -> /match-cancel
         # nettoie.
         #
-        # Parallelisation INTRA-phase : chaque joueur a son propre bucket
-        # de rate-limit Discord (per-member), donc les 10 grants partent
-        # en parallele. Le gather attend que TOUS soient finis avant de
-        # rendre la main -> l'invariant "rôles attribues AVANT le send"
-        # est preserve. Le host role tombe dans le meme gather (ce n'est
-        # pas un gate de visibilite, juste un flag).
+        # Consolidation 1 PATCH/joueur via member.edit(roles=...) au lieu
+        # de 2-3 PUT separes (revoke queue + grant match + grant host) :
+        # diff atomique cote Discord, divise par ~2 les appels API et
+        # supprime les 429 observes en prod (bucket per-guild PATCH
+        # /members/{u} ~10/10s). Semaphore(5) en garde-fou.
         leader_id = int(plan.lobby_leader.id)
 
         async def _setup_roles_for(member: discord.Member) -> None:
-            await _revoke_queue_role(member)
-            await _grant_match_role(member, free_cat_name)
-            if member.id == leader_id:
-                await _grant_match_role(member, MATCH_HOST_ROLE_NAME)
+            # Lookups via member.guild.roles : identique a guild.roles en
+            # prod (meme Guild object) et coherent avec _fake_member dans
+            # les tests (member.guild.roles = [] explicite).
+            mg = member.guild
+            queue_role = discord.utils.get(mg.roles, name=QUEUE_ROLE_NAME)
+            match_role = discord.utils.get(mg.roles, name=free_cat_name)
+            host_role  = (
+                discord.utils.get(mg.roles, name=MATCH_HOST_ROLE_NAME)
+                if member.id == leader_id else None
+            )
+            current = set(member.roles)
+            target  = set(current)
+            if queue_role is not None:
+                target.discard(queue_role)
+            if match_role is not None:
+                target.add(match_role)
+            if host_role is not None:
+                target.add(host_role)
+            if target == current:
+                return
+            async with self._guild_member_edit_sem:
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                    await member.edit(
+                        roles=list(target),
+                        reason="Match forme : setup roles",
+                    )
 
         role_members = [
             m for m in (guild.get_member(int(uid)) for uid in player_ids)
@@ -564,8 +591,11 @@ class MatchCog(commands.Cog):
             repository.delete_active_queue, self.db, guild.id, queue_type,
         )
 
-        # Etape 6 : deplacement vocal Waiting Room -> Waiting Match.
-        await self._move_players_to_match_vc(guild, free_cat_name, player_ids)
+        # Etape 6 : deplacement vocal Waiting Room -> Team 1/Team 2 selon
+        # l'assignation calculee par balance_teams. Les joueurs arrivent
+        # directement dans leur VC d'equipe, plus besoin de re-split apres
+        # le rassemblement Waiting Match.
+        await self._move_players_to_match_vc(guild, free_cat_name, plan)
 
         # Etape 7 : repose setup-queue (best-effort) dans le salon de
         # destination de ce queue_type. On preserve le channel d'origine
@@ -586,44 +616,62 @@ class MatchCog(commands.Cog):
         return match_id
 
     async def _move_players_to_match_vc(
-        self, guild, free_cat_name: str, player_ids: list[str],
+        self, guild, free_cat_name: str, plan,
     ) -> None:
-        """Deplace les 10 joueurs dans la VC `Waiting Match` de la categorie
-        attribuee. Skip silencieusement les joueurs hors vocal ou deja sur place.
+        """Deplace les 10 joueurs dans la VC d'equipe (`Team 1` / `Team 2`)
+        de la categorie attribuee, selon `plan.teams.team_a` / `team_b`.
+        Skip silencieusement les joueurs hors vocal ou deja sur place.
 
-        Tous les joueurs valides ont ete auto-deplaces dans `Waiting Room` au
-        clic sur Rejoindre (cf. queue_v2._move_to_waiting_room) ; on les
-        regroupe ici dans la VC du match formee.
+        Fallback gracieux si une VC d'equipe manque : on rabat sur l'autre
+        si dispo, sinon sur `Waiting Match`, sinon no-op. Tous les joueurs
+        valides ont ete auto-deplaces dans `Waiting Room` au clic sur
+        Rejoindre (cf. queue_v2._move_to_waiting_room).
         """
         category = discord.utils.get(guild.categories, name=free_cat_name)
         if category is None:
             return
+        team1_vc = discord.utils.get(category.voice_channels, name="Team 1")
+        team2_vc = discord.utils.get(category.voice_channels, name="Team 2")
         waiting_match = discord.utils.get(
             category.voice_channels, name="Waiting Match",
         )
-        if waiting_match is None:
+
+        # Mapping uid -> VC cible. team_a -> Team 1, team_b -> Team 2.
+        # Si une VC d'equipe manque, on rabat sur l'autre puis sur Waiting Match
+        # pour garantir que le joueur soit regroupe meme en config degradee.
+        a_dest = team1_vc or team2_vc or waiting_match
+        b_dest = team2_vc or team1_vc or waiting_match
+        if a_dest is None and b_dest is None:
             return
 
-        # Parallelisation : bucket per-member, donc 10 moves partent
-        # ensemble (gain ~2-3s vs serie). Les guards (membre absent,
-        # hors vocal, deja a destination) sont evalues dans la coro
-        # pour eviter de creer 10 taches qui ne font rien.
-        async def _move_one(uid: str) -> None:
-            member = guild.get_member(int(uid))
+        targets: dict[int, Any] = {}
+        for player in plan.teams.team_a:
+            if a_dest is not None:
+                targets[int(player.id)] = a_dest
+        for player in plan.teams.team_b:
+            if b_dest is not None:
+                targets[int(player.id)] = b_dest
+
+        # Parallelisation : bucket per-member, mais on capt a 5 concurrents
+        # via le semaphore partage avec les role edits pour ne pas saturer
+        # le bucket Discord PATCH /members/{u} (~10/10s per-guild).
+        async def _move_one(uid: int, dest) -> None:
+            member = guild.get_member(uid)
             if member is None:
                 return
             voice = getattr(member, "voice", None)
             if voice is None or getattr(voice, "channel", None) is None:
                 return
-            if voice.channel.id == waiting_match.id:
+            if voice.channel.id == dest.id:
                 return
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                await member.move_to(
-                    waiting_match, reason="Match forme : regroupement VC",
-                )
+            async with self._guild_member_edit_sem:
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                    await member.move_to(
+                        dest, reason="Match forme : regroupement VC equipe",
+                    )
 
         await asyncio.gather(
-            *(_move_one(uid) for uid in player_ids),
+            *(_move_one(uid, dest) for uid, dest in targets.items()),
             return_exceptions=True,
         )
 

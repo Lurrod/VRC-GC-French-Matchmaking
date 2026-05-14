@@ -326,9 +326,9 @@ async def test_roles_granted_before_match_message_sent():
         assert max(role_events) < send_event
 
 
-async def test_players_moved_to_waiting_match_vc():
+async def test_players_moved_to_team_vcs():
     """Les 10 joueurs en Waiting Room doivent etre deplaces vers la VC
-    Waiting Match de la categorie attribuee."""
+    Team 1 ou Team 2 de la categorie attribuee, selon leur assignation."""
     import bot as bot_module
     queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
 
@@ -336,7 +336,6 @@ async def test_players_moved_to_waiting_match_vc():
     waiting_room.name = "Waiting Room"
     waiting_room.id = 999
 
-    # Tous les joueurs sont dans Waiting Room (cas nominal apres clic Rejoindre)
     members = [
         _fake_member(i, f"P{i}", voice_channel=waiting_room) for i in range(10)
     ]
@@ -348,26 +347,35 @@ async def test_players_moved_to_waiting_match_vc():
     cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
     await cog.on_queue_full(inter, queue_doc, "open")
 
-    # Les 10 joueurs doivent avoir ete move_to vers la Waiting Match
-    waiting_match = next(v for v in cat.voice_channels if v.name == "Waiting Match")
+    team1 = next(v for v in cat.voice_channels if v.name == "Team 1")
+    team2 = next(v for v in cat.voice_channels if v.name == "Team 2")
+    # Verifie que chaque joueur a ete move_to vers Team 1 OU Team 2 (5+5)
+    dests = []
     for m in members:
-        m.move_to.assert_awaited_with(
-            waiting_match, reason="Match forme : regroupement VC",
-        )
+        m.move_to.assert_awaited_once()
+        dest = m.move_to.await_args.args[0]
+        assert dest in (team1, team2)
+        dests.append(dest)
+    assert dests.count(team1) == 5
+    assert dests.count(team2) == 5
 
 
-async def test_player_already_in_waiting_match_not_moved():
-    """Un joueur deja dans la Waiting Match ne doit pas etre deplace inutilement."""
+async def test_player_already_in_team_vc_not_moved():
+    """Les joueurs deja dans leur VC d'equipe ne doivent pas etre re-deplaces.
+
+    On place les 10 joueurs dans Team 1 : on s'attend a ce que les 5 de
+    team_a (assignes a Team 1) ne soient PAS deplaces, et que les 5 de
+    team_b soient deplaces vers Team 2.
+    """
     import bot as bot_module
     queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
 
     cat = _fake_category("Match #1", with_waiting=True)
-    waiting_match = next(v for v in cat.voice_channels if v.name == "Waiting Match")
+    team1 = next(v for v in cat.voice_channels if v.name == "Team 1")
+    team2 = next(v for v in cat.voice_channels if v.name == "Team 2")
 
-    # Un seul joueur est deja dans la Waiting Match
     members = [
-        _fake_member(0, "P0", voice_channel=waiting_match),
-        *[_fake_member(i, f"P{i}", voice_channel=None) for i in range(1, 10)],
+        _fake_member(i, f"P{i}", voice_channel=team1) for i in range(10)
     ]
     channel = _fake_channel(100)
     guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
@@ -376,20 +384,33 @@ async def test_player_already_in_waiting_match_not_moved():
     cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(0))
     await cog.on_queue_full(inter, queue_doc, "open")
 
-    # Le joueur deja a destination n'est pas re-deplace
-    members[0].move_to.assert_not_called()
-    # Les autres (hors vocal) non plus
-    for m in members[1:]:
-        m.move_to.assert_not_called()
+    not_moved = [m for m in members if not m.move_to.await_count]
+    moved_to_team2 = [
+        m for m in members
+        if m.move_to.await_count and m.move_to.await_args.args[0] is team2
+    ]
+    assert len(not_moved) == 5
+    assert len(moved_to_team2) == 5
+    # Aucun joueur deja en Team 1 ne doit etre re-deplace vers Team 1
+    for m in members:
+        for call in m.move_to.await_args_list:
+            assert call.args[0] is not team1
 
 
-async def test_queue_full_does_not_crash_when_no_waiting_match_vc():
-    """Si la categorie n'a pas de VC `Waiting Match`, le match doit quand meme
-    etre cree (fallback gracieux : juste pas de deplacement)."""
+async def test_queue_full_does_not_crash_when_no_team_vcs():
+    """Si la categorie n'a ni Team 1 ni Team 2 ni Waiting Match, le match
+    doit quand meme etre cree (fallback gracieux : pas de deplacement)."""
     import bot as bot_module
     queue_doc = _seed_full_queue(bot_module.db, guild_id=42)
 
-    cat = _fake_category("Match #1", with_waiting=False)
+    cat = MagicMock()
+    cat.name = "Match #1"
+    cat.voice_channels = []
+    prep = MagicMock()
+    prep.name = "match-preparation"
+    prep.id = 777
+    prep.send = AsyncMock(return_value=MagicMock(id=42424242))
+    cat.text_channels = [prep]
     members = [_fake_member(i, f"P{i}") for i in range(10)]
     channel = _fake_channel(100)
     guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
