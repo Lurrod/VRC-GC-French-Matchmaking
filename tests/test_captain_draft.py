@@ -16,38 +16,43 @@ def _p(uid: int, elo: int) -> Player:
     return Player(id=uid, name=f"P{uid}", elo=elo)
 
 
-def test_pick_captains_top_two_elo():
-    """Les 2 ELO les plus hauts sont designes capitaines."""
+def test_pick_captains_returns_two_distinct_players_from_pool():
+    """Les capitaines sont 2 joueurs distincts tires de la liste, peu importe l'ELO."""
     players = [
         _p(1, 1000), _p(2, 1100), _p(3, 1200), _p(4, 1300), _p(5, 1400),
         _p(6, 1500), _p(7, 1600), _p(8, 1700), _p(9, 1800), _p(10, 1900),
     ]
     rng = random.Random(42)
     cap_a, cap_b = pick_captains(players, rng=rng)
-    assert cap_a.id == 10  # ELO 1900
-    assert cap_b.id == 9   # ELO 1800
+    ids = {p.id for p in players}
+    assert cap_a.id != cap_b.id
+    assert cap_a.id in ids
+    assert cap_b.id in ids
 
 
-def test_pick_captains_tiebreak_random_seeded():
-    """Avec 4 joueurs a ELO identique, la seed RNG determine les capitaines de maniere reproductible."""
-    players = [_p(i, 1500) for i in range(1, 5)]
-    # Resultats observes pour les seeds 1 et 2 (pinnes pour eviter une assertion probabiliste).
-    cap_a_s1, cap_b_s1 = pick_captains(players, rng=random.Random(1))
-    cap_a_s2, cap_b_s2 = pick_captains(players, rng=random.Random(2))
-    # Reproductibilite : meme seed -> meme resultat (verification re-tirage)
-    cap_a_s1_again, cap_b_s1_again = pick_captains(players, rng=random.Random(1))
-    assert (cap_a_s1.id, cap_b_s1.id) == (cap_a_s1_again.id, cap_b_s1_again.id)
-    # Sanity : les deux capitaines doivent venir des 4 joueurs tied
-    assert {cap_a_s1.id, cap_b_s1.id}.issubset({1, 2, 3, 4})
-    assert {cap_a_s2.id, cap_b_s2.id}.issubset({1, 2, 3, 4})
+def test_pick_captains_is_reproducible_with_same_seed():
+    """Meme seed -> meme paire de capitaines."""
+    players = [_p(i, 1000 + i * 50) for i in range(1, 11)]
+    cap_a_1, cap_b_1 = pick_captains(players, rng=random.Random(1))
+    cap_a_2, cap_b_2 = pick_captains(players, rng=random.Random(1))
+    assert (cap_a_1.id, cap_b_1.id) == (cap_a_2.id, cap_b_2.id)
 
 
-def test_pick_captains_tiebreak_position_2():
-    """1 joueur clairement top, 3 a egalite pour position 2 -> RNG entre les 3."""
-    players = [_p(1, 2000)] + [_p(i, 1500) for i in range(2, 11)]
-    cap_a, cap_b = pick_captains(players, rng=random.Random(7))
-    assert cap_a.id == 1            # le top ELO unique
-    assert cap_b.id in {2, 3, 4, 5, 6, 7, 8, 9, 10}  # un des tied
+def test_pick_captains_ignores_elo():
+    """Le top ELO n'est PAS garanti d'etre capitaine (selection purement aleatoire).
+
+    On verifie qu'au moins sur quelques seeds, le joueur top ELO n'est pas pris
+    comme capitaine — preuve que l'ELO n'influence plus la selection.
+    """
+    players = [_p(1, 5000)] + [_p(i, 1000) for i in range(2, 11)]
+    top_elo_id = 1
+    seen_without_top = False
+    for seed in range(50):
+        cap_a, cap_b = pick_captains(players, rng=random.Random(seed))
+        if top_elo_id not in (cap_a.id, cap_b.id):
+            seen_without_top = True
+            break
+    assert seen_without_top, "Le top ELO devrait pouvoir ne pas etre capitaine"
 
 
 def test_pick_captains_raises_if_too_few_players():

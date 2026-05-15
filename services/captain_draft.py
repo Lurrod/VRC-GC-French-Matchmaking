@@ -2,7 +2,7 @@
 Pro Queue Captain Draft Service.
 
 Module isole pour la pro queue uniquement. Contient :
-  - pick_captains : selection des 2 capitaines (top 2 ELO, tie = RNG)
+  - pick_captains : selection des 2 capitaines (tirage aleatoire)
   - DraftState    : etat immutable du draft
   - CaptainDraftSession : orchestration Discord (UI + machine d'etat)
 
@@ -28,30 +28,21 @@ def pick_captains(
     *,
     rng: random.Random,
 ) -> tuple[Player, Player]:
-    """Designe 2 capitaines : top 2 ELO, tie-break aleatoire.
+    """Designe 2 capitaines par tirage aleatoire uniforme.
 
     Args:
         players: liste de Player (typiquement 10).
         rng: random.Random seede (pour reproductibilite des tests).
 
     Returns:
-        (cap_a, cap_b) : les deux premiers joueurs apres tri ELO
-        decroissant avec tie-break aleatoire. cap_a.elo >= cap_b.elo
-        sauf si les deux partagent le meme ELO.
+        (cap_a, cap_b) : deux joueurs distincts tires au hasard
+        dans la liste. L'ELO n'intervient pas dans la selection.
     """
     if len(players) < 2:
         raise ValueError(f"Il faut au moins 2 joueurs, recu {len(players)}")
 
-    # Tri par ELO decroissant, RNG sur les egalites.
-    # On groupe par ELO et on melange chaque groupe avec rng.
-    by_elo: dict[int, list[Player]] = {}
-    for p in players:
-        by_elo.setdefault(p.elo, []).append(p)
-    ordered: list[Player] = []
-    for elo in sorted(by_elo.keys(), reverse=True):
-        rng.shuffle(by_elo[elo])
-        ordered.extend(by_elo[elo])
-    return ordered[0], ordered[1]
+    cap_a, cap_b = rng.sample(list(players), 2)
+    return cap_a, cap_b
 
 
 # Snake order ABBAABBA. Sur 8 picks, capA pick aux indices 0, 3, 4, 7
@@ -253,7 +244,7 @@ class CaptainDraftSession:
             inline=False,
         )
         e.add_field(
-            name="🎲 Pool disponible (tri ELO ↓)",
+            name="🎲 Pool disponible",
             value=_build_pool_lines(self.state.pool),
             inline=False,
         )
