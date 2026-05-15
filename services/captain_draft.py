@@ -220,8 +220,6 @@ class CaptainDraftSession:
         Returns: DraftResult si complete.
         Raises: DraftCancelledError si annule.
         """
-        import discord  # noqa: F401  (import local pour ne pas alourdir module)
-
         loop = asyncio.get_running_loop()
         self._done = loop.create_future()
 
@@ -323,7 +321,10 @@ class CaptainDraftSession:
     async def _interaction_check(self, interaction: Any) -> bool:
         cid = interaction.data.get("custom_id", "")
         if cid == "pro_draft_pick":
-            if interaction.user.id != self.state.current_captain.id:
+            # Guard : si le draft est complet (interaction tardive cote Discord),
+            # on rejette proprement plutot que de laisser current_captain
+            # lever un RuntimeError.
+            if self.state.is_complete or interaction.user.id != self.state.current_captain.id:
                 await interaction.response.send_message(
                     "⏳ Ce n'est pas ton tour.", ephemeral=True,
                 )
