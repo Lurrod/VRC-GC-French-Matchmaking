@@ -29,7 +29,9 @@ def pick_captains(
         rng: random.Random seede (pour reproductibilite des tests).
 
     Returns:
-        (cap_a, cap_b) ou cap_a a l'ELO le plus haut (apres tie-break).
+        (cap_a, cap_b) : les deux premiers joueurs apres tri ELO
+        decroissant avec tie-break aleatoire. cap_a.elo >= cap_b.elo
+        sauf si les deux partagent le meme ELO.
     """
     if len(players) < 2:
         raise ValueError(f"Il faut au moins 2 joueurs, recu {len(players)}")
@@ -41,7 +43,6 @@ def pick_captains(
         by_elo.setdefault(p.elo, []).append(p)
     ordered: list[Player] = []
     for elo in sorted(by_elo.keys(), reverse=True):
-        bucket = list(by_elo[elo])
-        rng.shuffle(bucket)
-        ordered.extend(bucket)
+        rng.shuffle(by_elo[elo])
+        ordered.extend(by_elo[elo])
     return ordered[0], ordered[1]
