@@ -615,6 +615,56 @@ class MatchCog(commands.Cog):
                 logger.exception("[match] echec re-post setup-queue")
         return match_id
 
+    async def _move_players_to_waiting_match(
+        self,
+        guild,
+        category,
+        player_ids: list[str],
+    ) -> None:
+        """Deplace tous les `player_ids` vers la VC 'Waiting Match' de `category`.
+
+        Utilise sur la branche Pro Queue AVANT le draft, pour regrouper
+        les 10 joueurs dans un meme vocal pendant que les capitaines
+        choisissent leurs equipes.
+
+        Guards :
+          - skip si guild.get_member retourne None (utilisateur parti)
+          - skip si member n'est pas en voice
+          - skip si deja a destination
+        """
+        waiting_match = discord.utils.get(category.voice_channels, name="Waiting Match")
+        if waiting_match is None:
+            logger.warning(
+                "[match] _move_players_to_waiting_match: 'Waiting Match' "
+                "introuvable dans %s, no-op", category.name,
+            )
+            return
+
+        async def _move_one(uid_str: str) -> None:
+            try:
+                uid = int(uid_str)
+            except (TypeError, ValueError):
+                return
+            member = guild.get_member(uid)
+            if member is None:
+                return
+            voice = getattr(member, "voice", None)
+            if voice is None or voice.channel is None:
+                return
+            if voice.channel.id == waiting_match.id:
+                return
+            async with self._guild_member_edit_sem:
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                    await member.move_to(
+                        waiting_match,
+                        reason="Pro Queue : regroupement avant draft capitaine",
+                    )
+
+        await asyncio.gather(
+            *[_move_one(uid) for uid in player_ids],
+            return_exceptions=True,
+        )
+
     async def _move_players_to_match_vc(
         self, guild, free_cat_name: str, plan,
     ) -> None:

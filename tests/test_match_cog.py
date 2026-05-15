@@ -490,3 +490,34 @@ def test_build_match_embed_shows_all_players_and_map():
     for i in range(10):
         assert f"<@{i}>" in fields_str
     assert "Match #1" in fields_str
+
+
+# ── _move_players_to_waiting_match ────────────────────────────────
+async def test_move_to_waiting_match_routes_all_players():
+    """_move_players_to_waiting_match deplace les 10 joueurs vers Waiting Match."""
+    import bot as bot_module
+
+    # Voice channel source
+    waiting_room = MagicMock()
+    waiting_room.name = "Pro Waiting Room"
+    waiting_room.id = 7777
+
+    members = [
+        _fake_member(i, f"P{i}", voice_channel=waiting_room) for i in range(10)
+    ]
+    cat = _fake_category("Match #1", with_waiting=True)
+    channel = _fake_channel(100)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(42))
+    player_ids = [str(m.id) for m in members]
+
+    await cog._move_players_to_waiting_match(guild, cat, player_ids)
+
+    waiting_match_vc = next(c for c in cat.voice_channels if c.name == "Waiting Match")
+    moved_to_waiting = sum(
+        1 for m in members
+        if m.move_to.await_count > 0
+        and m.move_to.call_args.args[0].id == waiting_match_vc.id
+    )
+    assert moved_to_waiting == 10
