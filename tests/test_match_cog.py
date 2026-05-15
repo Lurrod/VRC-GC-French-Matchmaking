@@ -1,6 +1,7 @@
 """Tests d'integration du cog match (formation + persistance + reset queue)."""
 
 import random
+import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 
@@ -422,17 +423,29 @@ async def test_queue_full_does_not_crash_when_no_team_vcs():
 
 
 # ── queue_type propagation ────────────────────────────────────────
-async def test_on_queue_full_persists_queue_type_in_match_doc():
+async def test_on_queue_full_persists_queue_type_in_match_doc(monkeypatch):
     """Le match doc doit stocker queue_type='pro' quand on_queue_full
     est invoque pour la Pro Queue."""
     import bot as bot_module
+    import services.captain_draft as cd_module
+
+    # Pro queue passe desormais par CaptainDraftSession : simuler un draft complet.
+    async def _fake_run(self):
+        from services.captain_draft import DraftResult
+        state = self.state
+        for p in list(state.pool):
+            state = state.apply_pick(p)
+        return DraftResult.from_state(state)
+
+    monkeypatch.setattr(cd_module.CaptainDraftSession, "run", _fake_run)
+
     queue_doc = _seed_full_queue(
         bot_module.db, guild_id=42, queue_type="pro",
     )
 
     members = [_fake_member(i, f"P{i}") for i in range(10)]
     channel = _fake_channel(100)
-    cat = _fake_category("Match #1")
+    cat = _fake_category("Match #1", with_waiting=True)
     guild = _fake_guild(42, members=members,
                         categories=[cat], channel=channel)
     inter = _fake_interaction(guild)
@@ -521,3 +534,123 @@ async def test_move_to_waiting_match_routes_all_players():
         and m.move_to.call_args.args[0].id == waiting_match_vc.id
     )
     assert moved_to_waiting == 10
+
+
+# ── Pro Queue Captain Draft integration ───────────────────────────
+
+def _make_10_players():
+    """Retourne 10 Player avec ELO croissant pour les tests pro queue."""
+    return [Player(id=i, name=f"P{i}", elo=1500 + i * 50) for i in range(10)]
+
+
+def _patch_build_players(monkeypatch, players):
+    """Monkeypatch build_players dans cogs.match pour court-circuiter le fetch Mongo."""
+    import cogs.match as match_module
+    monkeypatch.setattr(match_module, "build_players", lambda *a, **kw: players)
+
+
+@pytest.mark.asyncio
+async def test_on_queue_full_open_does_not_invoke_captain_draft(monkeypatch):
+    """queue_type='open' -> plan_match utilise, CaptainDraftSession PAS instancie."""
+    from cogs.match import MatchCog
+    import bot as bot_module
+    import services.captain_draft as cd_module
+
+    players = _make_10_players()
+    _patch_build_players(monkeypatch, players)
+
+    instantiated = []
+    original_init = cd_module.CaptainDraftSession.__init__
+
+    def _spy_init(self, *args, **kwargs):
+        instantiated.append(1)
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(cd_module.CaptainDraftSession, "__init__", _spy_init)
+
+    members = [_fake_member(i, f"P{i}") for i in range(10)]
+    channel = _fake_channel(100)
+    cat = _fake_category("Match #1")
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    inter = _fake_interaction(guild, user=members[9])
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(42))
+    queue_doc = {"players": [str(m.id) for m in members], "channel_id": "100"}
+    try:
+        await cog.on_queue_full(inter, queue_doc, queue_type="open")
+    except Exception:
+        pass
+    assert instantiated == [], "CaptainDraftSession ne doit pas etre instancie en open queue"
+
+
+@pytest.mark.asyncio
+async def test_on_queue_full_pro_invokes_captain_draft(monkeypatch):
+    """queue_type='pro' -> CaptainDraftSession.run() est appele."""
+    from cogs.match import MatchCog
+    import bot as bot_module
+    import services.captain_draft as cd_module
+
+    players = _make_10_players()
+    _patch_build_players(monkeypatch, players)
+
+    run_calls = []
+
+    async def _fake_run(self):
+        run_calls.append(self)
+        # On simule un draft complet : retourne un DraftResult coherent
+        from services.captain_draft import DraftResult
+        state = self.state
+        for p in list(state.pool):
+            state = state.apply_pick(p)
+        return DraftResult.from_state(state)
+
+    monkeypatch.setattr(cd_module.CaptainDraftSession, "run", _fake_run)
+
+    members = [_fake_member(i, f"P{i}") for i in range(10)]
+    channel = _fake_channel(100)
+    cat = _fake_category("Match #1", with_waiting=True)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    inter = _fake_interaction(guild, user=members[9])
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(42))
+    queue_doc = {"players": [str(m.id) for m in members], "channel_id": "100"}
+    try:
+        await cog.on_queue_full(inter, queue_doc, queue_type="pro")
+    except Exception:
+        pass
+    assert len(run_calls) == 1, "CaptainDraftSession.run() doit etre appele exactement 1 fois"
+
+
+@pytest.mark.asyncio
+async def test_on_queue_full_pro_cancelled_does_not_delete_queue(monkeypatch):
+    """Si le draft est annule, delete_active_queue n'est PAS appele."""
+    from cogs.match import MatchCog
+    import bot as bot_module
+    import services.captain_draft as cd_module
+    from services.captain_draft import DraftCancelledError
+
+    players = _make_10_players()
+    _patch_build_players(monkeypatch, players)
+
+    async def _fake_run_cancel(self):
+        raise DraftCancelledError("admin", actor=None)
+
+    monkeypatch.setattr(cd_module.CaptainDraftSession, "run", _fake_run_cancel)
+
+    delete_calls = []
+    from services import repository
+    monkeypatch.setattr(
+        repository, "delete_active_queue",
+        lambda *a, **kw: delete_calls.append((a, kw)),
+    )
+
+    members = [_fake_member(i, f"P{i}") for i in range(10)]
+    channel = _fake_channel(100)
+    cat = _fake_category("Match #1", with_waiting=True)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    inter = _fake_interaction(guild, user=members[9])
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(42))
+    queue_doc = {"players": [str(m.id) for m in members], "channel_id": "100"}
+    await cog.on_queue_full(inter, queue_doc, queue_type="pro")
+    assert delete_calls == [], "delete_active_queue ne doit pas etre appele apres cancel"
