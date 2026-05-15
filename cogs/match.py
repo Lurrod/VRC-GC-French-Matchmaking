@@ -476,46 +476,51 @@ class MatchCog(commands.Cog):
         # Branche Pro Queue : draft capitaine au lieu d'auto-balance.
         # Les autres queues continuent avec plan_match comme avant.
         if queue_type == "pro":
-            # Trouver l'objet category (par nom) pour _move_players_to_waiting_match
-            category = discord.utils.get(guild.categories, name=free_cat_name)
+            # find_free_match_prep a deja garanti que prep_channel existe
+            # et appartient a une categorie Match #N libre. On reutilise
+            # sa back-reference plutot que de re-faire un discord.utils.get.
+            category = prep_channel.category
             if category is None:
-                logger.warning(
-                    "[match] Pro queue : category %s introuvable, fallback auto-balance",
-                    free_cat_name,
+                # Cas extreme : prep_channel orphelin. On annule l'evenement
+                # pour eviter un fallback silencieux qui ferait jouer une
+                # pro queue en mode auto-balance sans le savoir.
+                await self._fail(
+                    interaction, queue_doc,
+                    "Pro queue : structure de categorie inattendue (prep sans parent).",
+                    queue_type=queue_type,
                 )
-                plan = plan_match(players, free_category=free_cat_name, rng=self.rng)
-            else:
-                player_ids_for_move = [str(p.id) for p in players]
-                await self._move_players_to_waiting_match(
-                    guild, category, player_ids_for_move,
+                return None
+            player_ids_for_move = [str(p.id) for p in players]
+            await self._move_players_to_waiting_match(
+                guild, category, player_ids_for_move,
+            )
+            cap_a, cap_b = pick_captains(players, rng=self.rng)
+            pool = tuple(p for p in players if p.id not in (cap_a.id, cap_b.id))
+            session = CaptainDraftSession(
+                prep_channel=prep_channel,
+                cap_a=cap_a,
+                cap_b=cap_b,
+                pool=pool,
+                admin_role_names=ADMIN_ROLE_NAMES,
+            )
+            try:
+                result = await session.run()
+            except DraftCancelledError as exc:
+                logger.info(
+                    "[match] Pro draft annule (reason=%s actor=%s) — "
+                    "queue conservee, aucune action destructive",
+                    exc.reason, getattr(exc.actor, "id", None),
                 )
-                cap_a, cap_b = pick_captains(players, rng=self.rng)
-                pool = tuple(p for p in players if p.id not in (cap_a.id, cap_b.id))
-                session = CaptainDraftSession(
-                    prep_channel=prep_channel,
-                    cap_a=cap_a,
-                    cap_b=cap_b,
-                    pool=pool,
-                    admin_role_names=ADMIN_ROLE_NAMES,
-                )
-                try:
-                    result = await session.run()
-                except DraftCancelledError as exc:
-                    logger.info(
-                        "[match] Pro draft annule (reason=%s actor=%s) — "
-                        "queue conservee, aucune action destructive",
-                        exc.reason, getattr(exc.actor, "id", None),
+                with contextlib.suppress(discord.HTTPException):
+                    await interaction.followup.send(
+                        "❌ Draft annule. La queue reste active. "
+                        "`/leave` puis `/join` pour reset si besoin.",
+                        ephemeral=False,
                     )
-                    with contextlib.suppress(discord.HTTPException):
-                        await interaction.followup.send(
-                            "❌ Draft annule. La queue reste active. "
-                            "`/leave` puis `/join` pour reset si besoin.",
-                            ephemeral=False,
-                        )
-                    return None
-                plan = build_plan_from_draft(
-                    result, free_category=free_cat_name, rng=self.rng,
-                )
+                return None
+            plan = build_plan_from_draft(
+                result, free_category=free_cat_name, rng=self.rng,
+            )
         else:
             plan = plan_match(players, free_category=free_cat_name, rng=self.rng)
 

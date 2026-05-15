@@ -48,6 +48,7 @@ def _fake_category(name: str, t1_empty: bool = True, t2_empty: bool = True,
         prep.name = "match-preparation"
         prep.id = 700 + (hash(name) % 100)
         prep.send = AsyncMock(return_value=MagicMock(id=555))
+        prep.category = cat  # Back-reference to parent category
         cat.text_channels = [prep]
     else:
         cat.text_channels = []
