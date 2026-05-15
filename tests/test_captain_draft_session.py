@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -95,3 +96,140 @@ async def test_session_happy_path_8_picks_complete():
     assert len(result.team_b) == 5
     assert result.cap_a is cap_a
     assert result.cap_b is cap_b
+
+
+async def test_session_admin_cancel_raises():
+    """Un admin clique Cancel -> run() leve DraftCancelledError."""
+    cap_a = _p(1, 1900)
+    cap_b = _p(2, 1800)
+    pool = tuple(_p(i, 1500 - i) for i in range(3, 11))
+    prep_channel, _ = _fake_prep_channel()
+
+    session = CaptainDraftSession(
+        prep_channel=prep_channel,
+        cap_a=cap_a,
+        cap_b=cap_b,
+        pool=pool,
+        admin_role_names=ADMIN_ROLES,
+    )
+    run_task = asyncio.create_task(session.run())
+    for _ in range(50):
+        if session.message is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    admin = _fake_user(99, role_names=("Admin",))
+    inter = _fake_interaction(admin, "pro_draft_cancel")
+    await session._on_cancel(inter)
+
+    with pytest.raises(DraftCancelledError) as exc_info:
+        await asyncio.wait_for(run_task, timeout=1.0)
+    assert exc_info.value.reason == "admin"
+
+
+async def test_session_non_admin_cancel_rejected_by_interaction_check():
+    """Un non-admin qui clique Cancel : interaction_check renvoie False (ephemeral)."""
+    cap_a = _p(1, 1900)
+    cap_b = _p(2, 1800)
+    pool = tuple(_p(i, 1500 - i) for i in range(3, 11))
+    prep_channel, _ = _fake_prep_channel()
+    session = CaptainDraftSession(
+        prep_channel=prep_channel,
+        cap_a=cap_a,
+        cap_b=cap_b,
+        pool=pool,
+        admin_role_names=ADMIN_ROLES,
+    )
+    run_task = asyncio.create_task(session.run())
+    for _ in range(50):
+        if session.message is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    rando = _fake_user(500, role_names=())  # pas de role admin
+    inter = _fake_interaction(rando, "pro_draft_cancel")
+    ok = await session._interaction_check(inter)
+    assert ok is False
+    inter.response.send_message.assert_awaited_once()
+    args, kwargs = inter.response.send_message.call_args
+    assert kwargs.get("ephemeral") is True
+    # Le draft est toujours en picking
+    assert session.state.status == "picking"
+
+    # Cleanup : annuler la task avant qu'elle finisse pas (sinon warning)
+    run_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run_task
+
+
+async def test_session_pick_by_wrong_captain_rejected_by_interaction_check():
+    """Cap B clique pendant tour de Cap A : interaction_check renvoie False."""
+    cap_a = _p(1, 1900)
+    cap_b = _p(2, 1800)
+    pool = tuple(_p(i, 1500 - i) for i in range(3, 11))
+    prep_channel, _ = _fake_prep_channel()
+    session = CaptainDraftSession(
+        prep_channel=prep_channel,
+        cap_a=cap_a,
+        cap_b=cap_b,
+        pool=pool,
+        admin_role_names=ADMIN_ROLES,
+    )
+    run_task = asyncio.create_task(session.run())
+    for _ in range(50):
+        if session.message is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    # Tour 0 == cap_a, cap_b ne doit pas pouvoir pick
+    inter = _fake_interaction(cap_b, "pro_draft_pick", values=[str(pool[0].id)])
+    ok = await session._interaction_check(inter)
+    assert ok is False
+    inter.response.send_message.assert_awaited_once()
+    assert session.state.turn_index == 0
+
+    # Cleanup
+    run_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run_task
+
+
+async def test_session_double_pick_same_player_is_idempotent():
+    """2 _on_pick concurrents sur le meme player -> 1 pick applique."""
+    cap_a = _p(1, 1900)
+    cap_b = _p(2, 1800)
+    pool = tuple(_p(i, 1500 - i) for i in range(3, 11))
+    prep_channel, _ = _fake_prep_channel()
+    session = CaptainDraftSession(
+        prep_channel=prep_channel,
+        cap_a=cap_a,
+        cap_b=cap_b,
+        pool=pool,
+        admin_role_names=ADMIN_ROLES,
+    )
+    run_task = asyncio.create_task(session.run())
+    for _ in range(50):
+        if session.message is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    target = pool[0]
+    inter1 = _fake_interaction(cap_a, "pro_draft_pick", values=[str(target.id)])
+    inter2 = _fake_interaction(cap_a, "pro_draft_pick", values=[str(target.id)])
+    # Lance les deux callbacks en parallele
+    await asyncio.gather(session._on_pick(inter1), session._on_pick(inter2))
+    # Apres : 1 seul pick applique
+    assert session.state.turn_index == 1
+    assert target in session.state.team_a
+    assert target not in session.state.pool
+    # Un des 2 a recu un ephemeral "deja drafte"
+    n_ephemeral = sum(
+        1 for i in (inter1, inter2)
+        if i.response.send_message.await_count > 0
+    )
+    assert n_ephemeral == 1
+
+    # Cleanup
+    run_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run_task
