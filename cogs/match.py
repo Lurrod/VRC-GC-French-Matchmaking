@@ -494,6 +494,19 @@ class MatchCog(commands.Cog):
             await self._move_players_to_waiting_match(
                 guild, category, player_ids_for_move,
             )
+            # Grant le role Match #N AVANT le draft. Sans ce role, les
+            # joueurs non-admin ne voient pas le salon match-preparation
+            # (overwrites de categorie), donc les capitaines non-modos
+            # ne peuvent pas interagir avec le Select de draft. Seuls
+            # les modos pouvaient pick — bug observe en prod.
+            draft_members = [
+                m for m in (guild.get_member(p.id) for p in players)
+                if m is not None
+            ]
+            await asyncio.gather(
+                *(_grant_match_role(m, free_cat_name) for m in draft_members),
+                return_exceptions=True,
+            )
             cap_a, cap_b = pick_captains(players, rng=self.rng)
             pool = tuple(p for p in players if p.id not in (cap_a.id, cap_b.id))
             session = CaptainDraftSession(
@@ -510,6 +523,13 @@ class MatchCog(commands.Cog):
                     "[match] Pro draft annule (reason=%s actor=%s) — "
                     "queue conservee, aucune action destructive",
                     exc.reason, getattr(exc.actor, "id", None),
+                )
+                # Cleanup : revoke le role Match #N grant avant le draft.
+                # Sinon les joueurs gardent le role apres annulation et
+                # voient toujours le salon de match-preparation.
+                await asyncio.gather(
+                    *(_revoke_match_role(m, free_cat_name) for m in draft_members),
+                    return_exceptions=True,
                 )
                 with contextlib.suppress(discord.HTTPException):
                     await interaction.followup.send(

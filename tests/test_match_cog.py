@@ -655,3 +655,110 @@ async def test_on_queue_full_pro_cancelled_does_not_delete_queue(monkeypatch):
     queue_doc = {"players": [str(m.id) for m in members], "channel_id": "100"}
     await cog.on_queue_full(inter, queue_doc, queue_type="pro")
     assert delete_calls == [], "delete_active_queue ne doit pas etre appele apres cancel"
+
+
+def _make_match_role(name: str = "Match #1"):
+    """Cree un faux discord.Role compatible avec discord.utils.get(..., name=...)."""
+    role = MagicMock()
+    role.name = name
+    return role
+
+
+@pytest.mark.asyncio
+async def test_on_queue_full_pro_grants_match_role_before_draft_run(monkeypatch):
+    """Regression : sans le role Match #N, les capitaines non-modos ne
+    voient pas le salon match-preparation et ne peuvent pas pick. Le
+    grant doit donc precoder l'appel a CaptainDraftSession.run().
+    """
+    from cogs.match import MatchCog
+    import bot as bot_module
+    import services.captain_draft as cd_module
+
+    players = _make_10_players()
+    _patch_build_players(monkeypatch, players)
+
+    events: list[tuple[str, int | None]] = []
+
+    async def _fake_run(self):
+        events.append(("draft_run", None))
+        from services.captain_draft import DraftResult
+        state = self.state
+        for p in list(state.pool):
+            state = state.apply_pick(p)
+        return DraftResult.from_state(state)
+
+    monkeypatch.setattr(cd_module.CaptainDraftSession, "run", _fake_run)
+
+    match_role = _make_match_role("Match #1")
+    members = [_fake_member(i, f"P{i}") for i in range(10)]
+    for m in members:
+        m.guild.roles = [match_role]
+        async def _add(*args, _id=m.id, **kwargs):
+            events.append(("grant", _id))
+        m.add_roles.side_effect = _add
+
+    channel = _fake_channel(100)
+    cat = _fake_category("Match #1", with_waiting=True)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    guild.roles = [match_role]
+    inter = _fake_interaction(guild, user=members[9])
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(42))
+    queue_doc = {"players": [str(m.id) for m in members], "channel_id": "100"}
+    try:
+        await cog.on_queue_full(inter, queue_doc, queue_type="pro")
+    except Exception:
+        pass
+
+    grant_indices = [i for i, e in enumerate(events) if e[0] == "grant"]
+    run_idx = events.index(("draft_run", None))
+    assert len(grant_indices) == 10, (
+        f"Le role Match #N doit etre grant aux 10 joueurs avant le draft, "
+        f"vu {len(grant_indices)} grants"
+    )
+    assert max(grant_indices) < run_idx, (
+        "Tous les grants de role Match #N doivent precoder draft.run()"
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_queue_full_pro_cancel_revokes_match_role(monkeypatch):
+    """Sur DraftCancelledError, le role Match #N grant avant le draft
+    doit etre revoke pour eviter que les joueurs gardent acces au salon.
+    """
+    from cogs.match import MatchCog
+    import bot as bot_module
+    import services.captain_draft as cd_module
+    from services.captain_draft import DraftCancelledError
+
+    players = _make_10_players()
+    _patch_build_players(monkeypatch, players)
+
+    async def _fake_run_cancel(self):
+        raise DraftCancelledError("admin", actor=None)
+
+    monkeypatch.setattr(cd_module.CaptainDraftSession, "run", _fake_run_cancel)
+
+    match_role = _make_match_role("Match #1")
+    members = [_fake_member(i, f"P{i}") for i in range(10)]
+    # Simule que add_roles a effectivement ajoute le role (grant avant draft)
+    # pour que remove_roles ne soit pas court-circuite par "role not in member.roles".
+    for m in members:
+        m.guild.roles = [match_role]
+        m.roles = [match_role]
+
+    channel = _fake_channel(100)
+    cat = _fake_category("Match #1", with_waiting=True)
+    guild = _fake_guild(42, members=members, categories=[cat], channel=channel)
+    guild.roles = [match_role]
+    inter = _fake_interaction(guild, user=members[9])
+
+    cog = MatchCog(bot_module.bot, bot_module.db, rng=random.Random(42))
+    queue_doc = {"players": [str(m.id) for m in members], "channel_id": "100"}
+    await cog.on_queue_full(inter, queue_doc, queue_type="pro")
+
+    revoked = [m for m in members if m.remove_roles.await_count >= 1]
+    assert len(revoked) == 10, (
+        f"Le role Match #N doit etre revoke aux 10 joueurs sur cancel, "
+        f"vu {len(revoked)} revokes"
+    )
