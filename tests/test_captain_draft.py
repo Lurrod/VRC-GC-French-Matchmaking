@@ -5,7 +5,9 @@ import random
 
 import pytest
 
-from services.captain_draft import DraftState, PICK_SEQUENCE, pick_captains, DraftResult
+from types import SimpleNamespace
+
+from services.captain_draft import DraftState, PICK_SEQUENCE, pick_captains, DraftResult, _is_admin
 from services.match_service import build_plan_from_draft
 from services.team_balancer import Player
 
@@ -154,6 +156,42 @@ def test_draft_result_rejects_incomplete_state():
     state, _ = _make_state_with_8_pool()
     with pytest.raises(ValueError, match="non termine"):
         DraftResult.from_state(state)
+
+
+ADMIN_ROLE_NAMES = ("Admin", "Match Staff", "Administrateur")
+
+
+def _fake_user(*, role_names: tuple[str, ...] = (), manage_guild: bool = False):
+    """Mime un discord.Member pour `_is_admin` : `roles` + `guild_permissions`."""
+    return SimpleNamespace(
+        roles=[SimpleNamespace(name=n) for n in role_names],
+        guild_permissions=SimpleNamespace(manage_guild=manage_guild),
+    )
+
+
+def test_is_admin_accepts_manage_guild_permission():
+    """Un admin Discord (manage_guild=True) doit pouvoir annuler le draft,
+    meme sans role nomme 'Admin'/'Match Staff'/'Administrateur'."""
+    user = _fake_user(role_names=("Administrator",), manage_guild=True)
+    assert _is_admin(user, ADMIN_ROLE_NAMES) is True
+
+
+def test_is_admin_accepts_named_admin_role_as_fallback():
+    """Compat : un user avec role 'Match Staff' mais sans manage_guild
+    reste autorise (cas d'un staff sans permissions elevees)."""
+    user = _fake_user(role_names=("Match Staff",), manage_guild=False)
+    assert _is_admin(user, ADMIN_ROLE_NAMES) is True
+
+
+def test_is_admin_rejects_regular_user():
+    user = _fake_user(role_names=("Member",), manage_guild=False)
+    assert _is_admin(user, ADMIN_ROLE_NAMES) is False
+
+
+def test_is_admin_handles_missing_attributes():
+    """Robustesse : un objet sans `guild_permissions` ni `roles` ne crashe pas."""
+    bare = SimpleNamespace()
+    assert _is_admin(bare, ADMIN_ROLE_NAMES) is False
 
 
 def test_build_plan_from_draft_uses_capA_as_leader():

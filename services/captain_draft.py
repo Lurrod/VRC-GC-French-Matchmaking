@@ -153,7 +153,16 @@ class DraftCancelledError(Exception):
         self.actor = actor
 
 
-def _has_any_role(user: Any, role_names: tuple[str, ...]) -> bool:
+def _is_admin(user: Any, role_names: tuple[str, ...]) -> bool:
+    """Admin = permission Discord `manage_guild` OU role dont le nom est
+    dans `role_names`. Aligne le check du bouton "Annuler le draft" sur
+    le reste du codebase (`/match-cancel` etc.) ou seul `manage_guild`
+    compte. Le fallback par nom de role est garde pour les serveurs
+    ayant un role "Match Staff" sans permission elevee.
+    """
+    perms = getattr(user, "guild_permissions", None)
+    if perms is not None and getattr(perms, "manage_guild", False):
+        return True
     return any(r.name in role_names for r in getattr(user, "roles", []))
 
 
@@ -321,7 +330,7 @@ class CaptainDraftSession:
                 )
                 return False
         elif cid == "pro_draft_cancel":
-            if not _has_any_role(interaction.user, self.admin_role_names):
+            if not _is_admin(interaction.user, self.admin_role_names):
                 await interaction.response.send_message(
                     "❌ Reserve aux admins.", ephemeral=True,
                 )
@@ -331,6 +340,10 @@ class CaptainDraftSession:
     async def _on_pick(self, interaction: Any) -> None:
         async with self._lock:
             if self.state.status != "picking":
+                # Interaction obsolete (draft fini/annule entre temps) : on
+                # acknowledge silencieusement pour eviter "Interaction failed".
+                with contextlib.suppress(Exception):
+                    await interaction.response.defer()
                 return
             picked_id_str = interaction.data["values"][0]
             picked_id = int(picked_id_str)
@@ -350,15 +363,26 @@ class CaptainDraftSession:
             )
             embed = self._build_embed()
             view = self._build_view()
-            await self.message.edit(embed=embed, view=view)
+            # `interaction.response.edit_message` acknowledge ET edite en un
+            # seul appel API : evite le "This interaction failed" rouge que
+            # voyaient les capitaines quand `message.edit` + defer tardif
+            # depassait les 3s d'ACK.
+            try:
+                await interaction.response.edit_message(embed=embed, view=view)
+            except Exception:
+                # Fallback si la response a deja ete consommee (cas extreme
+                # de double-click). On force l'etat correct via message.edit.
+                logger.exception("[draft] edit_message via interaction a leve, fallback message.edit")
+                with contextlib.suppress(Exception):
+                    await self.message.edit(embed=embed, view=view)
             if self.state.is_complete and self._done is not None and not self._done.done():
                 self._done.set_result(DraftResult.from_state(self.state))
-            with contextlib.suppress(Exception):
-                await interaction.response.defer()
 
     async def _on_cancel(self, interaction: Any) -> None:
         async with self._lock:
             if self.state.status != "picking":
+                with contextlib.suppress(Exception):
+                    await interaction.response.defer()
                 return
             self.state = replace(self.state, status="cancelled")
             actor = interaction.user
@@ -366,9 +390,15 @@ class CaptainDraftSession:
             embed.title = "❌ Draft annule"
             embed.description = f"Annule par <@{actor.id}>"
             view = self._build_view()
-            await self.message.edit(embed=embed, view=view)
+            # Meme pattern que `_on_pick` : edit_message acknowledge dans le
+            # meme appel API. Sans ca le bouton "Annuler" affichait
+            # "Interaction failed" a l'admin alors que l'annulation passait.
+            try:
+                await interaction.response.edit_message(embed=embed, view=view)
+            except Exception:
+                logger.exception("[draft] edit_message via interaction a leve, fallback message.edit")
+                with contextlib.suppress(Exception):
+                    await self.message.edit(embed=embed, view=view)
             logger.info("[draft] cancelled by=%s", actor.id)
-            with contextlib.suppress(Exception):
-                await interaction.response.defer()
             if self._done is not None and not self._done.done():
                 self._done.set_exception(DraftCancelledError("admin", actor))

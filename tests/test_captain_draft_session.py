@@ -29,11 +29,15 @@ def _fake_role(name: str):
     return r
 
 
-def _fake_user(user_id: int, role_names: tuple[str, ...] = ()):
+def _fake_user(user_id: int, role_names: tuple[str, ...] = (), *, manage_guild: bool = False):
     u = MagicMock()
     u.id = user_id
     u.mention = f"<@{user_id}>"
     u.roles = [_fake_role(n) for n in role_names]
+    # Forcer la valeur (sinon MagicMock auto-cree un truthy qui fait
+    # passer le check `_is_admin` par accident).
+    u.guild_permissions = MagicMock()
+    u.guild_permissions.manage_guild = manage_guild
     return u
 
 
@@ -125,6 +129,40 @@ async def test_session_admin_cancel_raises():
     with pytest.raises(DraftCancelledError) as exc_info:
         await asyncio.wait_for(run_task, timeout=1.0)
     assert exc_info.value.reason == "admin"
+
+
+async def test_session_admin_with_manage_guild_can_cancel_without_named_role():
+    """Regression : un admin Discord avec permission `manage_guild` mais
+    sans role nomme 'Admin'/'Match Staff'/'Administrateur' doit pouvoir
+    annuler. Avant fix, seul le nom de role etait verifie -> les admins
+    ne pouvaient plus annuler le draft (rapport user 2026-05-16)."""
+    cap_a = _p(1, 1900)
+    cap_b = _p(2, 1800)
+    pool = tuple(_p(i, 1500 - i) for i in range(3, 11))
+    prep_channel, _ = _fake_prep_channel()
+    session = CaptainDraftSession(
+        prep_channel=prep_channel,
+        cap_a=cap_a,
+        cap_b=cap_b,
+        pool=pool,
+        admin_role_names=ADMIN_ROLES,
+    )
+    run_task = asyncio.create_task(session.run())
+    for _ in range(50):
+        if session.message is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    # Admin avec un role nomme "Administrator" (pas dans ADMIN_ROLES)
+    # mais avec la permission Discord manage_guild = True.
+    admin = _fake_user(99, role_names=("Administrator",), manage_guild=True)
+    inter = _fake_interaction(admin, "pro_draft_cancel")
+    ok = await session._interaction_check(inter)
+    assert ok is True, "Admin avec manage_guild doit pouvoir cliquer Cancel"
+
+    await session._on_cancel(inter)
+    with pytest.raises(DraftCancelledError):
+        await asyncio.wait_for(run_task, timeout=1.0)
 
 
 async def test_session_non_admin_cancel_rejected_by_interaction_check():
