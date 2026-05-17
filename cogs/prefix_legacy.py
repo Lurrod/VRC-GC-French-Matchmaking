@@ -41,7 +41,7 @@ def _has_prefix_access(ctx: commands.Context, db) -> bool:
 
 
 def _match_elo_for_member(db, guild_id: int, user_id: int, queue_type: str) -> int:
-    doc = repository.get_elo_col(db, guild_id).find_one(
+    doc = repository.get_elo_col(db).find_one(
         {"_id": repository.player_doc_id(user_id, queue_type)}
     )
     if doc and doc.get("elo") is not None:
@@ -70,7 +70,7 @@ class PrefixLegacyCog(commands.Cog):
 
     @commands.command(name="leaderboard")
     async def leaderboard_prefix(self, ctx: commands.Context):
-        col  = repository.get_elo_col(self.db, ctx.guild.id)
+        col  = repository.get_elo_col(self.db)
         docs = list(col.find().sort([("elo", -1), ("wins", -1), ("_id", 1)]).limit(10))
         if not docs:
             await ctx.send("Aucun joueur enregistre.")
@@ -94,7 +94,7 @@ class PrefixLegacyCog(commands.Cog):
     async def stats_prefix(self, ctx: commands.Context, member: discord.Member = None):
         if member is None:
             member = ctx.author
-        col = repository.get_elo_col(self.db, ctx.guild.id)
+        col = repository.get_elo_col(self.db)
         doc = col.find_one({"_id": str(member.id)})
         if not doc:
             await ctx.send(f"{member.display_name} n'a pas encore joue.")
@@ -134,7 +134,7 @@ class PrefixLegacyCog(commands.Cog):
             return
         queue = "open"
         players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
-        col = repository.get_elo_col(self.db, ctx.guild.id)
+        col = repository.get_elo_col(self.db)
         avg_elo = _compute_match_change(self.db, ctx.guild.id, players, queue)
         embed = discord.Embed(
             title="🏆 Résultats Open — Victoire enregistrée !",
@@ -171,7 +171,7 @@ class PrefixLegacyCog(commands.Cog):
             return
         queue = "open"
         players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
-        col = repository.get_elo_col(self.db, ctx.guild.id)
+        col = repository.get_elo_col(self.db)
         avg_elo = _compute_match_change(self.db, ctx.guild.id, players, queue)
         embed = discord.Embed(
             title="💀 Résultats — Défaite enregistrée !",
