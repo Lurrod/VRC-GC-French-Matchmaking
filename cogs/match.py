@@ -1232,7 +1232,7 @@ class MatchCog(commands.Cog):
         try:
             outcome = await asyncio.to_thread(
                 apply_match_validation,
-                self.db, guild.id, match_doc, multipliers=multipliers,
+                self.db, match_doc, multipliers=multipliers,
             )
         except Exception:
             logger.exception("[match] apply_match_validation a leve")

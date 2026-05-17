@@ -295,7 +295,7 @@ async def build_leaderboard_payload(
             page=page, total_pages=total_pages_cached, queue_type=queue_type,
         )
 
-    col  = repository.get_elo_col(db, guild.id)
+    col  = repository.get_elo_col(db)
     docs = list(col.find({"queue_type": queue_type})
                   .sort([("elo", -1), ("wins", -1), ("_id", 1)]))
     if not docs:

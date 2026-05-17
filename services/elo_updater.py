@@ -50,7 +50,6 @@ class MatchEloOutcome:
 
 def apply_match_validation(
     db,
-    guild_id: int | str,
     match_doc: dict,
     multipliers: dict[str, float] | None = None,
 ) -> MatchEloOutcome:
@@ -65,8 +64,7 @@ def apply_match_validation(
     delta est clamp a -old_elo (ne descend pas sous 0).
 
     Args:
-        db:          Database mongomock/pymongo
-        guild_id:    guild Discord
+        db:          Database mongomock/pymongo (collection ELO partagee)
         match_doc:   doc match avec `team_a`, `team_b`, `status`, `queue_type`
         multipliers: dict user_id (str) -> multiplicateur ACS (~0.7..1.3)
 
@@ -100,7 +98,7 @@ def apply_match_validation(
         mults = multipliers
         weighted = True
 
-    elo_col = repository.get_elo_col(db, guild_id)
+    elo_col = repository.get_elo_col(db)
 
     winner_mults = [float(mults.get(str(p["id"]), 1.0)) for p in winners]
     loser_mults  = [float(mults.get(str(p["id"]), 1.0)) for p in losers]
