@@ -268,7 +268,7 @@ class VoteView(discord.ui.View):
         # 1) Retrouver le match via le message_id
         match = await asyncio.to_thread(
             repository.get_match_by_message,
-            self.db, inter.guild_id, inter.message.id,
+            self.db, inter.message.id,
         )
         if not match:
             await inter.response.send_message("❌ Match introuvable.", ephemeral=True)
@@ -297,7 +297,7 @@ class VoteView(discord.ui.View):
         # entre-temps, le vote est rejete proprement.
         updated = await asyncio.to_thread(
             repository.add_match_vote,
-            self.db, inter.guild_id, match["_id"], inter.user.id, choice,
+            self.db, match["_id"], inter.user.id, choice,
         )
         if updated is None:
             await inter.response.send_message(
@@ -324,7 +324,7 @@ class VoteView(discord.ui.View):
         if target_status:
             transitioned_doc = await asyncio.to_thread(
                 lambda: repository.transition_match_status(
-                    self.db, inter.guild_id, match["_id"],
+                    self.db, match["_id"],
                     from_status="pending", to_status=target_status,
                 ),
             )
@@ -335,7 +335,7 @@ class VoteView(discord.ui.View):
                 # afficher l'etat reel sans tirer `on_validated` de notre cote.
                 fetched = await asyncio.to_thread(
                     repository.get_match,
-                    self.db, inter.guild_id, match["_id"],
+                    self.db, match["_id"],
                 )
                 updated = fetched or updated
 
@@ -410,8 +410,8 @@ class MatchCog(commands.Cog):
         # 10 comptes Riot et les 10 docs ELO en une seule requete chacune.
         # Toutes les ops Mongo sont regroupees dans un seul thread pour
         # ne pas geler l'event loop pendant la formation du match.
-        elo_col  = repository.get_elo_col(self.db, guild.id)
-        riot_col = repository.get_riot_col(self.db, guild.id)
+        elo_col  = repository.get_elo_col(self.db)
+        riot_col = repository.get_riot_col(self.db)
 
         def _batch_fetch() -> tuple[dict[str, dict], dict[str, int]]:
             riot_map: dict[str, dict] = {}
@@ -556,8 +556,8 @@ class MatchCog(commands.Cog):
         match_id = await asyncio.to_thread(
             repository.create_match,
             self.db,
-            guild_id=guild.id,
             queue_type=queue_type,
+            origin_guild_id=guild.id,
             team_a=serialize_team(plan.teams.team_a),
             team_b=serialize_team(plan.teams.team_b),
             map_name=plan.map_name,
@@ -640,7 +640,7 @@ class MatchCog(commands.Cog):
             # cree pour eviter un orphelin que personne ne peut voter
             # (pas de message_id => VoteView introuvable).
             logger.exception("[match] prep_channel.send a leve, rollback match doc")
-            matches_col = repository.get_matches_col(self.db, guild.id)
+            matches_col = repository.get_matches_col(self.db)
             await asyncio.to_thread(
                 matches_col.delete_one, {"_id": match_id},
             )
@@ -654,7 +654,7 @@ class MatchCog(commands.Cog):
         # Etape 4 : associer le message_id au match doc. Sans ca,
         # `get_match_by_message` (utilise par VoteView) ne retrouve pas
         # le match au moment du vote.
-        matches_col = repository.get_matches_col(self.db, guild.id)
+        matches_col = repository.get_matches_col(self.db)
         await asyncio.to_thread(
             matches_col.update_one,
             {"_id": match_id}, {"$set": {"message_id": msg.id}},
@@ -849,7 +849,7 @@ class MatchCog(commands.Cog):
             try:
                 await asyncio.to_thread(
                     repository.schedule_role_cleanups,
-                    self.db, guild.id, match_doc["_id"],
+                    self.db, match_doc["_id"],
                     match_role_at=now + timedelta(seconds=MATCH_ROLE_CLEANUP_DELAY_SECONDS),
                     host_role_at=now + timedelta(seconds=MATCH_HOST_CLEANUP_DELAY_SECONDS),
                 )
@@ -907,7 +907,7 @@ class MatchCog(commands.Cog):
         appel passe."""
         claimed = await asyncio.to_thread(
             repository.claim_match_role_cleanup,
-            self.db, guild.id, match_doc["_id"],
+            self.db, match_doc["_id"],
         )
         if not claimed:
             return  # deja fait ailleurs (tick recovery apres crash)
@@ -948,12 +948,12 @@ class MatchCog(commands.Cog):
         # Cleanup role "Match #N" pour les 10 joueurs.
         pending = await asyncio.to_thread(
             repository.find_pending_match_role_cleanups,
-            self.db, guild.id, now,
+            self.db, now,
         )
         for match in pending:
             claimed = await asyncio.to_thread(
                 repository.claim_match_role_cleanup,
-                self.db, guild.id, match["_id"],
+                self.db, match["_id"],
             )
             if not claimed:
                 continue
@@ -973,12 +973,12 @@ class MatchCog(commands.Cog):
         # Cleanup role "Match Host" pour le lobby leader.
         pending_host = await asyncio.to_thread(
             repository.find_pending_host_role_cleanups,
-            self.db, guild.id, now,
+            self.db, now,
         )
         for match in pending_host:
             claimed = await asyncio.to_thread(
                 repository.claim_host_role_cleanup,
-                self.db, guild.id, match["_id"],
+                self.db, match["_id"],
             )
             if not claimed:
                 continue
@@ -1022,7 +1022,7 @@ class MatchCog(commands.Cog):
 
     async def _check_vote_timeouts_for_guild(self, guild, cutoff: datetime) -> int:
         flagged = 0
-        col = repository.get_matches_col(self.db, guild.id)
+        col = repository.get_matches_col(self.db)
         # Scan en thread : `find().toList()` est bloquant et peut iterer
         # sur N matches, gelant l'event loop Discord.
         def _fetch_stale() -> list[Mapping[str, Any]]:
@@ -1059,7 +1059,7 @@ class MatchCog(commands.Cog):
                 # l'ELO au prochain tick.
                 await asyncio.to_thread(
                     repository.transition_match_status,
-                    self.db, guild.id, match["_id"],
+                    self.db, match["_id"],
                     from_status="pending", to_status="validated_a",
                     validated_at=repaired_validated_at,
                 )
@@ -1067,14 +1067,14 @@ class MatchCog(commands.Cog):
             if count_b >= MAJORITY_THRESHOLD:
                 await asyncio.to_thread(
                     repository.transition_match_status,
-                    self.db, guild.id, match["_id"],
+                    self.db, match["_id"],
                     from_status="pending", to_status="validated_b",
                     validated_at=repaired_validated_at,
                 )
                 continue
             transitioned = await asyncio.to_thread(
                 repository.transition_match_status,
-                self.db, guild.id, match["_id"],
+                self.db, match["_id"],
                 from_status="pending", to_status="contested",
             )
             if transitioned is None:
@@ -1176,7 +1176,7 @@ class MatchCog(commands.Cog):
         # Scan bloquant -> thread pour ne pas geler l'event loop.
         stale = await asyncio.to_thread(
             repository.find_validated_unverified,
-            self.db, guild.id, start_cutoff,
+            self.db, start_cutoff,
         )
         for match in stale:
             validated_at = match.get("validated_at") or match.get("created_at")
@@ -1224,7 +1224,7 @@ class MatchCog(commands.Cog):
         # set_match_henrik_verified, ou de tick concurrent.
         claimed = await asyncio.to_thread(
             repository.claim_match_for_elo,
-            self.db, guild.id, match_doc["_id"],
+            self.db, match_doc["_id"],
         )
         if claimed is None:
             return  # Deja applique par un tick precedent.
@@ -1238,13 +1238,13 @@ class MatchCog(commands.Cog):
             logger.exception("[match] apply_match_validation a leve")
             # Rollback du claim pour permettre un retry au prochain tick.
             await asyncio.to_thread(
-                repository.release_elo_claim, self.db, guild.id, match_doc["_id"],
+                repository.release_elo_claim, self.db, match_doc["_id"],
             )
             return
 
         await asyncio.to_thread(
             repository.set_match_henrik_verified,
-            self.db, guild.id, match_doc["_id"],
+            self.db, match_doc["_id"],
             found=multipliers is not None,
             multipliers=multipliers,
         )
@@ -1277,14 +1277,14 @@ class MatchCog(commands.Cog):
             b_map: dict[str, str] = {}
             for player in match_doc.get("team_a", []):
                 pid = str(player["id"])
-                r = repository.get_riot_account(self.db, guild.id, pid)
+                r = repository.get_riot_account(self.db, pid)
                 if r and r.get("puuid"):
                     a_map[r["puuid"]] = pid
                 if pid == leader_uid_local:
                     leader = r
             for player in match_doc.get("team_b", []):
                 pid = str(player["id"])
-                r = repository.get_riot_account(self.db, guild.id, pid)
+                r = repository.get_riot_account(self.db, pid)
                 if r and r.get("puuid"):
                     b_map[r["puuid"]] = pid
                 if pid == leader_uid_local:
@@ -1292,7 +1292,7 @@ class MatchCog(commands.Cog):
             # Fallback : si le leader n'est plus dans les 10 (apres un
             # /match-replace par exemple), lookup direct.
             if leader is None:
-                leader = repository.get_riot_account(self.db, guild.id, leader_uid_local)
+                leader = repository.get_riot_account(self.db, leader_uid_local)
             return leader, a_map, b_map
 
         leader_riot, team_a_uid_by_puuid, team_b_uid_by_puuid = await asyncio.to_thread(
@@ -1443,7 +1443,7 @@ class MatchCog(commands.Cog):
         # cancel echoue proprement plutot que de creer un etat incoherent.
         match = await asyncio.to_thread(
             repository.cancel_match_atomically,
-            self.db, interaction.guild_id,
+            self.db,
             channel_id=interaction.channel_id,
         )
         if not match:
@@ -1510,7 +1510,7 @@ class MatchCog(commands.Cog):
             )
             return
 
-        matches_col = repository.get_matches_col(self.db, interaction.guild_id)
+        matches_col = repository.get_matches_col(self.db)
         match = await asyncio.to_thread(
             matches_col.find_one,
             {"channel_id": interaction.channel_id, "status": "pending"},
@@ -1547,7 +1547,7 @@ class MatchCog(commands.Cog):
 
         riot = await asyncio.to_thread(
             repository.get_riot_account,
-            self.db, interaction.guild_id, remplacant.id,
+            self.db, remplacant.id,
         )
         if not riot:
             await interaction.followup.send(
@@ -1560,7 +1560,7 @@ class MatchCog(commands.Cog):
         # Lookup ELO du remplacant dans le queue_type du match en cours.
         # Le doc joueur utilise un compound _id `<uid>:<queue_type>`.
         match_queue_type = match.get("queue_type", "open")
-        elo_col = repository.get_elo_col(self.db, interaction.guild_id)
+        elo_col = repository.get_elo_col(self.db)
         elo_doc = await asyncio.to_thread(
             elo_col.find_one,
             {"_id": repository.player_doc_id(remplacant.id, match_queue_type)},
