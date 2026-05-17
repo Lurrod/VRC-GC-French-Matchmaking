@@ -31,7 +31,7 @@ def _check_queue_type(queue_type: str) -> None:
 
 
 def player_doc_id(user_id: int | str, queue_type: str) -> str:
-    """Compound _id pour un doc joueur dans elo_<guild>."""
+    """Compound _id pour un doc joueur dans la collection partagée `elo`."""
     _check_queue_type(queue_type)
     return f"{user_id}:{queue_type}"
 
@@ -77,9 +77,13 @@ def _ensure_indexes(col, kind: str) -> None:
     _indexed_collections.add(name)
 
 
-def get_elo_col(db: Database, guild_id: int | str) -> Collection:
-    """Collection ELO d'un guild (1 collection par serveur Discord)."""
-    col = db[f"elo_{guild_id}"]
+def get_elo_col(db: Database) -> Collection:
+    """Collection ELO partagée entre toutes les guilds.
+
+    Le doc `_id` reste compound `<user_id>:<queue_type>`. Tous les bots utilisant
+    la même MongoDB lisent/écrivent ici, peu importe la guild Discord d'origine.
+    """
+    col = db["elo"]
     _ensure_indexes(col, "elo")
     return col
 
@@ -133,15 +137,15 @@ def get_or_create_player(
 
 
 # ── V2 : comptes Riot lies ───────────────────────────────────────
-def get_riot_col(db: Database, guild_id: int | str) -> Collection:
-    """1 collection par guild pour les comptes Riot lies."""
-    col = db[f"riot_accounts_{guild_id}"]
+def get_riot_col(db: Database) -> Collection:
+    """Collection riot link partagée entre toutes les guilds."""
+    col = db["riot"]
     _ensure_indexes(col, "riot")
     return col
 
 
 def find_riot_account_by_puuid(
-    db: Database, guild_id: int | str, puuid: str,
+    db: Database, puuid: str,
 ) -> Mapping[str, Any] | None:
     """Renvoie le doc riot_account ayant ce puuid, ou None.
 
@@ -149,12 +153,11 @@ def find_riot_account_by_puuid(
     Riot d'etre lie a deux comptes Discord differents (multi-account)."""
     if not puuid:
         return None
-    return get_riot_col(db, guild_id).find_one({"puuid": puuid})
+    return get_riot_col(db).find_one({"puuid": puuid})
 
 
 def link_riot_account(
     db: Database,
-    guild_id: int | str,
     user_id: int | str,
     *,
     riot_name: str,
@@ -166,12 +169,12 @@ def link_riot_account(
 ) -> None:
     """Enregistre ou met a jour le lien Discord <-> Riot (metadata uniquement).
 
-    L'ELO de matchmaking est stockee dans `elo_<guild_id>` ; ce doc ne sert
-    plus qu'a (a) verifier qu'un joueur est lie pour rejoindre la queue,
+    L'ELO de matchmaking est stockee dans la collection partagee `elo` ; ce doc
+    ne sert plus qu'a (a) verifier qu'un joueur est lie pour rejoindre la queue,
     (b) afficher le rang Riot de reference.
     """
     from datetime import datetime
-    get_riot_col(db, guild_id).update_one(
+    get_riot_col(db).update_one(
         {"_id": str(user_id)},
         {"$set": {
             "riot_name":     riot_name,
@@ -186,13 +189,13 @@ def link_riot_account(
     )
 
 
-def get_riot_account(db: Database, guild_id: int | str, user_id: int | str) -> Mapping[str, Any] | None:
-    return get_riot_col(db, guild_id).find_one({"_id": str(user_id)})
+def get_riot_account(db: Database, user_id: int | str) -> Mapping[str, Any] | None:
+    return get_riot_col(db).find_one({"_id": str(user_id)})
 
 
-def unlink_riot_account(db: Database, guild_id: int | str, user_id: int | str) -> bool:
+def unlink_riot_account(db: Database, user_id: int | str) -> bool:
     """Renvoie True si une entree a ete supprimee."""
-    res = get_riot_col(db, guild_id).delete_one({"_id": str(user_id)})
+    res = get_riot_col(db).delete_one({"_id": str(user_id)})
     return res.deleted_count > 0
 
 
@@ -339,17 +342,21 @@ def find_player_in_any_queue(
 
 
 # ── V2 : matches ──────────────────────────────────────────────────
-def get_matches_col(db: Database, guild_id: int | str) -> Collection:
-    col = db[f"matches_{guild_id}"]
+def get_matches_col(db: Database) -> Collection:
+    """Collection matches partagée entre toutes les guilds.
+
+    Chaque match porte un champ `origin_guild_id` pour la traçabilité
+    (présent uniquement sur les matches créés après le refactor)."""
+    col = db["matches"]
     _ensure_indexes(col, "matches")
     return col
 
 
 def create_match(
     db: Database,
-    guild_id: int | str,
     *,
     queue_type: str,
+    origin_guild_id: int,
     team_a:        list[dict],
     team_b:        list[dict],
     map_name:      str,
@@ -362,7 +369,10 @@ def create_match(
 
     `queue_type` (kw-only) : "pro" | "open" | "gc". Persiste sur le doc
     pour permettre les filtres par type (leaderboard refresh, /reset-queue,
-    Pro Queue Henrik skip)."""
+    Pro Queue Henrik skip).
+
+    `origin_guild_id` (kw-only) : guild Discord d'origine du match, pour
+    la traçabilité cross-guild (la collection `matches` est partagée)."""
     _check_queue_type(queue_type)
     from datetime import datetime
     doc: dict[str, Any] = {
@@ -370,6 +380,7 @@ def create_match(
         "team_b":          team_b,
         "map":             map_name,
         "queue_type":      queue_type,
+        "origin_guild_id": int(origin_guild_id),
         "lobby_leader_id": str(lobby_leader_id),
         "category_name":   category_name,
         "status":          "pending",
@@ -379,21 +390,20 @@ def create_match(
         "message_id":      int(message_id) if message_id else None,
         "channel_id":      int(channel_id) if channel_id else None,
     }
-    res = get_matches_col(db, guild_id).insert_one(doc)
+    res = get_matches_col(db).insert_one(doc)
     return res.inserted_id
 
 
-def get_match(db: Database, guild_id: int | str, match_id: Any) -> Mapping[str, Any] | None:
-    return get_matches_col(db, guild_id).find_one({"_id": match_id})
+def get_match(db: Database, match_id: Any) -> Mapping[str, Any] | None:
+    return get_matches_col(db).find_one({"_id": match_id})
 
 
-def get_match_by_message(db: Database, guild_id: int | str, message_id: int) -> Mapping[str, Any] | None:
-    return get_matches_col(db, guild_id).find_one({"message_id": int(message_id)})
+def get_match_by_message(db: Database, message_id: int) -> Mapping[str, Any] | None:
+    return get_matches_col(db).find_one({"message_id": int(message_id)})
 
 
 def add_match_vote(
     db: Database,
-    guild_id: int | str,
     match_id: Any,
     user_id: int | str,
     choice: str,
@@ -406,7 +416,7 @@ def add_match_vote(
     polluer `votes` apres-coup."""
     if choice not in ("a", "b"):
         raise ValueError(f"choice doit etre 'a' ou 'b', recu {choice!r}")
-    return get_matches_col(db, guild_id).find_one_and_update(
+    return get_matches_col(db).find_one_and_update(
         {"_id": match_id, "status": "pending"},
         {"$set": {f"votes.{user_id}": choice}},
         return_document=ReturnDocument.AFTER,
@@ -415,7 +425,6 @@ def add_match_vote(
 
 def set_match_status(
     db: Database,
-    guild_id: int | str,
     match_id: Any,
     status: str,
 ) -> None:
@@ -423,12 +432,11 @@ def set_match_status(
     update: dict[str, Any] = {"status": status}
     if status in ("validated_a", "validated_b"):
         update["validated_at"] = datetime.now(UTC)
-    get_matches_col(db, guild_id).update_one({"_id": match_id}, {"$set": update})
+    get_matches_col(db).update_one({"_id": match_id}, {"$set": update})
 
 
 def transition_match_status(
     db: Database,
-    guild_id: int | str,
     match_id: Any,
     *,
     from_status: str,
@@ -447,7 +455,7 @@ def transition_match_status(
     update: dict[str, Any] = {"status": to_status}
     if to_status in ("validated_a", "validated_b"):
         update["validated_at"] = validated_at or datetime.now(UTC)
-    return get_matches_col(db, guild_id).find_one_and_update(
+    return get_matches_col(db).find_one_and_update(
         {"_id": match_id, "status": from_status},
         {"$set": update},
         return_document=ReturnDocument.AFTER,
@@ -456,7 +464,6 @@ def transition_match_status(
 
 def claim_match_for_elo(
     db: Database,
-    guild_id: int | str,
     match_id: Any,
 ) -> Mapping[str, Any] | None:
     """Atomic claim : marque `elo_applied=True` uniquement si non deja applique.
@@ -468,7 +475,7 @@ def claim_match_for_elo(
         Le doc apres claim si on a bien obtenu le verrou, None si deja claime.
     """
     from datetime import datetime
-    return get_matches_col(db, guild_id).find_one_and_update(
+    return get_matches_col(db).find_one_and_update(
         {
             "_id":         match_id,
             "status":      {"$in": ["validated_a", "validated_b"]},
@@ -484,26 +491,27 @@ def claim_match_for_elo(
 
 def release_elo_claim(
     db: Database,
-    guild_id: int | str,
     match_id: Any,
 ) -> None:
     """Annule le claim si l'application ELO a echoue (rollback)."""
-    get_matches_col(db, guild_id).update_one(
+    get_matches_col(db).update_one(
         {"_id": match_id},
         {"$unset": {"elo_applied": "", "elo_applied_at": ""}},
     )
 
 
 def find_validated_unverified(
-    db: Database, guild_id: int | str, cutoff_dt,
+    db: Database, cutoff_dt,
 ) -> list[Mapping[str, Any]]:
     """Matches validated_a/b avec validated_at <= cutoff_dt, sans Henrik
     verifie ET sans ELO deja applique (elo_applied != True).
 
     Le filtre sur `elo_applied` evite que le tick suivant ne retraite un match
     dont l'ELO a deja ete applique mais dont `henrik_verified` n'a pas ete
-    ecrit (crash entre les deux operations)."""
-    return list(get_matches_col(db, guild_id).find({
+    ecrit (crash entre les deux operations).
+
+    Note: scanne la collection `matches` partagée — résultats toutes guilds confondues (filtrer sur `origin_guild_id` si besoin)."""
+    return list(get_matches_col(db).find({
         "status":       {"$in": ["validated_a", "validated_b"]},
         "validated_at": {"$lte": cutoff_dt},
         "elo_applied":  {"$ne": True},
@@ -516,7 +524,6 @@ def find_validated_unverified(
 
 def set_match_henrik_verified(
     db: Database,
-    guild_id: int | str,
     match_id: Any,
     *,
     found:       bool,
@@ -528,7 +535,7 @@ def set_match_henrik_verified(
     }
     if multipliers is not None:
         update["henrik_multipliers"] = {str(k): float(v) for k, v in multipliers.items()}
-    get_matches_col(db, guild_id).update_one(
+    get_matches_col(db).update_one(
         {"_id": match_id}, {"$set": update},
     )
 
@@ -631,7 +638,6 @@ def claim_application_decision(
 
 def cancel_match_atomically(
     db: Database,
-    guild_id: int | str,
     *,
     channel_id: int | str,
 ) -> Mapping[str, Any] | None:
@@ -644,7 +650,7 @@ def cancel_match_atomically(
         puis update_one ecraserait le `validated_a` deja transitionne)
       - `_verify_match` qui appliquerait l'ELO (status=cancelled mais
         elo_applied=True : etat incoherent)."""
-    return get_matches_col(db, guild_id).find_one_and_update(
+    return get_matches_col(db).find_one_and_update(
         {
             "channel_id": channel_id,
             "status": {"$in": ["pending", "validated_a", "validated_b", "contested"]},
@@ -657,7 +663,6 @@ def cancel_match_atomically(
 
 def schedule_role_cleanups(
     db: Database,
-    guild_id: int | str,
     match_id: Any,
     *,
     match_role_at,
@@ -668,7 +673,7 @@ def schedule_role_cleanups(
     Le `_timeout_loop` scanne ces timestamps et applique les revocations
     quand l'echeance est passee. Permet la reprise apres redemarrage du
     bot (sinon les `asyncio.create_task` sont perdues)."""
-    get_matches_col(db, guild_id).update_one(
+    get_matches_col(db).update_one(
         {"_id": match_id},
         {"$set": {
             "match_role_cleanup_at": match_role_at,
@@ -678,33 +683,39 @@ def schedule_role_cleanups(
 
 
 def find_pending_match_role_cleanups(
-    db: Database, guild_id: int | str, now,
+    db: Database, now,
 ) -> list[Mapping[str, Any]]:
-    """Matches dont le cleanup du role Match #N est du et pas encore fait."""
-    return list(get_matches_col(db, guild_id).find({
+    """Matches dont le cleanup du role Match #N est du et pas encore fait.
+
+    Note: scanne la collection `matches` partagée — résultats toutes guilds confondues (filtrer sur `origin_guild_id` si besoin).
+    """
+    return list(get_matches_col(db).find({
         "match_role_cleanup_at":   {"$lte": now},
         "match_role_cleanup_done": {"$ne": True},
     }))
 
 
 def find_pending_host_role_cleanups(
-    db: Database, guild_id: int | str, now,
+    db: Database, now,
 ) -> list[Mapping[str, Any]]:
-    """Matches dont le cleanup du role Match Host est du et pas encore fait."""
-    return list(get_matches_col(db, guild_id).find({
+    """Matches dont le cleanup du role Match Host est du et pas encore fait.
+
+    Note: scanne la collection `matches` partagée — résultats toutes guilds confondues (filtrer sur `origin_guild_id` si besoin).
+    """
+    return list(get_matches_col(db).find({
         "host_role_cleanup_at":   {"$lte": now},
         "host_role_cleanup_done": {"$ne": True},
     }))
 
 
 def claim_match_role_cleanup(
-    db: Database, guild_id: int | str, match_id: Any,
+    db: Database, match_id: Any,
 ) -> bool:
     """CAS atomique : marque le cleanup du role Match #N en cours.
 
     Renvoie True si le claim est obtenu (l'appelant doit faire le cleanup
     et est le seul a y proceder), False si un autre tick l'a deja fait."""
-    res = get_matches_col(db, guild_id).update_one(
+    res = get_matches_col(db).update_one(
         {"_id": match_id, "match_role_cleanup_done": {"$ne": True}},
         {"$set": {"match_role_cleanup_done": True}},
     )
@@ -712,10 +723,10 @@ def claim_match_role_cleanup(
 
 
 def claim_host_role_cleanup(
-    db: Database, guild_id: int | str, match_id: Any,
+    db: Database, match_id: Any,
 ) -> bool:
     """CAS atomique : marque le cleanup du role Match Host en cours."""
-    res = get_matches_col(db, guild_id).update_one(
+    res = get_matches_col(db).update_one(
         {"_id": match_id, "host_role_cleanup_done": {"$ne": True}},
         {"$set": {"host_role_cleanup_done": True}},
     )
