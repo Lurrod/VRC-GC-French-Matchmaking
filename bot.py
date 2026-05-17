@@ -71,8 +71,8 @@ client: MongoClient = MongoClient(
 )
 db     = client["elobot"]
 
-def get_elo_col(guild_id: int | str) -> Collection:
-    return repository.get_elo_col(db, guild_id)
+def get_elo_col() -> Collection:
+    return repository.get_elo_col(db)
 
 def get_bypass_col() -> Collection:
     return repository.get_bypass_col(db)
