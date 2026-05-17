@@ -62,7 +62,7 @@ def _get_player(col, member: discord.Member, queue_type: str):
 
 def _match_elo_for_member(db, guild_id: int, user_id: int, queue_type: str) -> int:
     """ELO serveur du joueur dans la queue donnee, fallback ELO_REFERENCE."""
-    doc = repository.get_elo_col(db, guild_id).find_one(
+    doc = repository.get_elo_col(db).find_one(
         {"_id": repository.player_doc_id(user_id, queue_type)}
     )
     if doc and doc.get("elo") is not None:
@@ -144,7 +144,7 @@ class ELOAdminCog(commands.Cog):
             await interaction.response.send_message("Pas la permission.", ephemeral=True)
             return
         players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
-        col = repository.get_elo_col(self.db, interaction.guild_id)
+        col = repository.get_elo_col(self.db)
 
         if queue == "pro":
             deltas = [16] * len(players)
@@ -206,7 +206,7 @@ class ELOAdminCog(commands.Cog):
             await interaction.response.send_message("Pas la permission.", ephemeral=True)
             return
         players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
-        col = repository.get_elo_col(self.db, interaction.guild_id)
+        col = repository.get_elo_col(self.db)
 
         if queue == "pro":
             deltas = [16] * len(players)
@@ -282,7 +282,7 @@ class ELOAdminCog(commands.Cog):
         if not _has_access(interaction, self.db):
             await interaction.response.send_message("Pas la permission.", ephemeral=True)
             return
-        col = repository.get_elo_col(self.db, interaction.guild_id)
+        col = repository.get_elo_col(self.db)
         if all_players:
             count = col.count_documents({"queue_type": queue})
             col.update_many(
@@ -347,10 +347,10 @@ class ELOAdminCog(commands.Cog):
             )
             return
 
-        elo_col = repository.get_elo_col(self.db, interaction.guild_id)
+        elo_col = repository.get_elo_col(self.db)
         elo_col.delete_many({"queue_type": queue})
         repository.delete_active_queue(self.db, interaction.guild_id, queue)
-        matches_col = repository.get_matches_col(self.db, interaction.guild_id)
+        matches_col = repository.get_matches_col(self.db)
         matches_col.delete_many({"queue_type": queue})
         repository.clear_leaderboard_message_id(self.db, interaction.guild_id, queue)
 
@@ -407,7 +407,7 @@ class ELOAdminCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        col = repository.get_elo_col(self.db, interaction.guild_id)
+        col = repository.get_elo_col(self.db)
         _get_player(col, joueur, queue)
         delta = montant if action == "add" else -montant
         old_doc = col.find_one_and_update(
@@ -450,7 +450,7 @@ class ELOAdminCog(commands.Cog):
         if montant <= 0:
             await interaction.response.send_message("❌ Le montant doit etre strictement positif.", ephemeral=True)
             return
-        col = repository.get_elo_col(self.db, interaction.guild_id)
+        col = repository.get_elo_col(self.db)
         _get_player(col, joueur, queue)
         delta = montant if action == "add" else -montant
         old_doc = col.find_one_and_update(
@@ -493,7 +493,7 @@ class ELOAdminCog(commands.Cog):
         if montant <= 0:
             await interaction.response.send_message("❌ Le montant doit etre strictement positif.", ephemeral=True)
             return
-        col = repository.get_elo_col(self.db, interaction.guild_id)
+        col = repository.get_elo_col(self.db)
         _get_player(col, joueur, queue)
         delta = montant if action == "add" else -montant
         old_doc = col.find_one_and_update(
@@ -526,7 +526,7 @@ class ELOAdminCog(commands.Cog):
     async def stats(self, interaction: discord.Interaction, queue: str, joueur: discord.Member = None):
         if joueur is None:
             joueur = interaction.user
-        col = repository.get_elo_col(self.db, interaction.guild_id)
+        col = repository.get_elo_col(self.db)
         doc_id = repository.player_doc_id(joueur.id, queue)
         doc = col.find_one({"_id": doc_id})
         if not doc:
