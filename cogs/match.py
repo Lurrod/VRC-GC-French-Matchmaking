@@ -948,7 +948,7 @@ class MatchCog(commands.Cog):
         # Cleanup role "Match #N" pour les 10 joueurs.
         pending = await asyncio.to_thread(
             repository.find_pending_match_role_cleanups,
-            self.db, now,
+            self.db, now, origin_guild_id=guild.id,
         )
         for match in pending:
             claimed = await asyncio.to_thread(
@@ -973,7 +973,7 @@ class MatchCog(commands.Cog):
         # Cleanup role "Match Host" pour le lobby leader.
         pending_host = await asyncio.to_thread(
             repository.find_pending_host_role_cleanups,
-            self.db, now,
+            self.db, now, origin_guild_id=guild.id,
         )
         for match in pending_host:
             claimed = await asyncio.to_thread(
@@ -1027,8 +1027,9 @@ class MatchCog(commands.Cog):
         # sur N matches, gelant l'event loop Discord.
         def _fetch_stale() -> list[Mapping[str, Any]]:
             return list(col.find({
-                "status":     "pending",
-                "created_at": {"$lt": cutoff},
+                "status":          "pending",
+                "created_at":      {"$lt": cutoff},
+                "origin_guild_id": guild.id,
             }))
         stale = await asyncio.to_thread(_fetch_stale)
         for match in stale:
@@ -1176,7 +1177,7 @@ class MatchCog(commands.Cog):
         # Scan bloquant -> thread pour ne pas geler l'event loop.
         stale = await asyncio.to_thread(
             repository.find_validated_unverified,
-            self.db, start_cutoff,
+            self.db, start_cutoff, origin_guild_id=guild.id,
         )
         for match in stale:
             validated_at = match.get("validated_at") or match.get("created_at")

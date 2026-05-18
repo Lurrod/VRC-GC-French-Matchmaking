@@ -501,7 +501,7 @@ def release_elo_claim(
 
 
 def find_validated_unverified(
-    db: Database, cutoff_dt,
+    db: Database, cutoff_dt, *, origin_guild_id: int | None = None,
 ) -> list[Mapping[str, Any]]:
     """Matches validated_a/b avec validated_at <= cutoff_dt, sans Henrik
     verifie ET sans ELO deja applique (elo_applied != True).
@@ -510,8 +510,10 @@ def find_validated_unverified(
     dont l'ELO a deja ete applique mais dont `henrik_verified` n'a pas ete
     ecrit (crash entre les deux operations).
 
-    Note: scanne la collection `matches` partagée — résultats toutes guilds confondues (filtrer sur `origin_guild_id` si besoin)."""
-    return list(get_matches_col(db).find({
+    Si `origin_guild_id` est fourni, le scan est limite aux matches de cette
+    guild (multi-guild scoping). Sinon, scanne toutes les guilds (compat
+    tests / deploiement single-guild)."""
+    filt: dict[str, Any] = {
         "status":       {"$in": ["validated_a", "validated_b"]},
         "validated_at": {"$lte": cutoff_dt},
         "elo_applied":  {"$ne": True},
@@ -519,7 +521,10 @@ def find_validated_unverified(
             {"henrik_verified": {"$exists": False}},
             {"henrik_verified": False},
         ],
-    }))
+    }
+    if origin_guild_id is not None:
+        filt["origin_guild_id"] = int(origin_guild_id)
+    return list(get_matches_col(db).find(filt))
 
 
 def set_match_henrik_verified(
@@ -683,29 +688,39 @@ def schedule_role_cleanups(
 
 
 def find_pending_match_role_cleanups(
-    db: Database, now,
+    db: Database, now, *, origin_guild_id: int | None = None,
 ) -> list[Mapping[str, Any]]:
     """Matches dont le cleanup du role Match #N est du et pas encore fait.
 
-    Note: scanne la collection `matches` partagée — résultats toutes guilds confondues (filtrer sur `origin_guild_id` si besoin).
+    Si `origin_guild_id` est fourni, le scan est limite aux matches de cette
+    guild (multi-guild scoping). Sinon, scanne toutes les guilds (compat
+    tests / deploiement single-guild).
     """
-    return list(get_matches_col(db).find({
+    filt: dict[str, Any] = {
         "match_role_cleanup_at":   {"$lte": now},
         "match_role_cleanup_done": {"$ne": True},
-    }))
+    }
+    if origin_guild_id is not None:
+        filt["origin_guild_id"] = int(origin_guild_id)
+    return list(get_matches_col(db).find(filt))
 
 
 def find_pending_host_role_cleanups(
-    db: Database, now,
+    db: Database, now, *, origin_guild_id: int | None = None,
 ) -> list[Mapping[str, Any]]:
     """Matches dont le cleanup du role Match Host est du et pas encore fait.
 
-    Note: scanne la collection `matches` partagée — résultats toutes guilds confondues (filtrer sur `origin_guild_id` si besoin).
+    Si `origin_guild_id` est fourni, le scan est limite aux matches de cette
+    guild (multi-guild scoping). Sinon, scanne toutes les guilds (compat
+    tests / deploiement single-guild).
     """
-    return list(get_matches_col(db).find({
+    filt: dict[str, Any] = {
         "host_role_cleanup_at":   {"$lte": now},
         "host_role_cleanup_done": {"$ne": True},
-    }))
+    }
+    if origin_guild_id is not None:
+        filt["origin_guild_id"] = int(origin_guild_id)
+    return list(get_matches_col(db).find(filt))
 
 
 def claim_match_role_cleanup(

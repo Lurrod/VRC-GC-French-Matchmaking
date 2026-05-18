@@ -68,3 +68,36 @@ def test_create_match_persists_origin_guild_id(db):
     doc = repository.get_match(db, match_id)
     assert doc is not None
     assert doc["origin_guild_id"] == 12345
+
+
+def test_find_pending_match_role_cleanups_filters_by_origin_guild_id(db):
+    """Scan helpers must scope by origin_guild_id when provided.
+
+    In a multi-guild deployment, each guild's background loop must only
+    process its own matches, otherwise admin notifications / role
+    revocations can land on the wrong guild. The CAS prevents data
+    corruption but UX consequences still need this scoping.
+    """
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    past = now - timedelta(hours=1)
+    # Two matches, two origin guilds, both have a pending role-cleanup deadline
+    db["matches"].insert_one({
+        "_id": "m_a",
+        "origin_guild_id": 100,
+        "match_role_cleanup_at": past,
+        "match_role_cleanup_done": False,
+    })
+    db["matches"].insert_one({
+        "_id": "m_b",
+        "origin_guild_id": 200,
+        "match_role_cleanup_at": past,
+        "match_role_cleanup_done": False,
+    })
+    res_a = repository.find_pending_match_role_cleanups(db, now, origin_guild_id=100)
+    assert [d["_id"] for d in res_a] == ["m_a"]
+    res_b = repository.find_pending_match_role_cleanups(db, now, origin_guild_id=200)
+    assert [d["_id"] for d in res_b] == ["m_b"]
+    # Unscoped: returns both (preserves single-guild / tests backward compat)
+    res_all = repository.find_pending_match_role_cleanups(db, now)
+    assert sorted(d["_id"] for d in res_all) == ["m_a", "m_b"]
