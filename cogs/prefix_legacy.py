@@ -40,7 +40,7 @@ def _has_prefix_access(ctx: commands.Context, db) -> bool:
     return bool(role_id and any(r.id == role_id for r in ctx.author.roles))
 
 
-def _match_elo_for_member(db, guild_id: int, user_id: int, queue_type: str) -> int:
+def _match_elo_for_member(db, user_id: int, queue_type: str) -> int:
     doc = repository.get_elo_col(db).find_one(
         {"_id": repository.player_doc_id(user_id, queue_type)}
     )
@@ -49,8 +49,8 @@ def _match_elo_for_member(db, guild_id: int, user_id: int, queue_type: str) -> i
     return elo_calc.ELO_REFERENCE
 
 
-def _compute_match_change(db, guild_id: int, members: list, queue_type: str) -> int:
-    elos = [_match_elo_for_member(db, guild_id, m.id, queue_type) for m in members]
+def _compute_match_change(db, members: list, queue_type: str) -> int:
+    elos = [_match_elo_for_member(db, m.id, queue_type) for m in members]
     return round(sum(elos) / len(elos)) if elos else elo_calc.ELO_REFERENCE
 
 
@@ -135,7 +135,7 @@ class PrefixLegacyCog(commands.Cog):
         queue = "open"
         players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
         col = repository.get_elo_col(self.db)
-        avg_elo = _compute_match_change(self.db, ctx.guild.id, players, queue)
+        avg_elo = _compute_match_change(self.db, players, queue)
         embed = discord.Embed(
             title="🏆 Résultats Open — Victoire enregistrée !",
             description=f"Avg ELO du groupe : **{avg_elo}** -> gains pondérés par position (joueur1→joueur5)",
@@ -172,7 +172,7 @@ class PrefixLegacyCog(commands.Cog):
         queue = "open"
         players = [p for p in [joueur1, joueur2, joueur3, joueur4, joueur5] if p is not None]
         col = repository.get_elo_col(self.db)
-        avg_elo = _compute_match_change(self.db, ctx.guild.id, players, queue)
+        avg_elo = _compute_match_change(self.db, players, queue)
         embed = discord.Embed(
             title="💀 Résultats — Défaite enregistrée !",
             description=f"Avg ELO du groupe : **{avg_elo}** -> pertes pondérées par position (joueur1→joueur5)",
