@@ -112,7 +112,7 @@ async def test_link_riot_persists_metadata_without_seeding_elo():
     assert doc["puuid"]       == "abc"
     assert doc["source"]      == "link_base"
 
-    # Aucun seed ELO : la collection elo_<guild> reste vide tant que le
+    # Aucun seed ELO : la collection partagée `elo` reste vide tant que le
     # joueur n'a pas joue dans une queue.
     assert repository.get_elo_col(bot_module.db).count_documents({}) == 0
 

@@ -47,7 +47,7 @@ def build_players(
         player_ids:    IDs Discord (str) en queue
         riot_accounts: dict[user_id_str -> doc Riot] (gate-keep uniquement)
         member_names:  dict[user_id_str -> display_name]
-        bot_elos:      dict[user_id_str -> ELO serveur (elo_<guild>.elo)].
+        bot_elos:      dict[user_id_str -> ELO serveur (collection partagée `elo`, champ `elo`)].
                        Source de verite pour le matchmaking.
 
     Joueur sans compte Riot lie -> ignore (queue rejettera < 10).

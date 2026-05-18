@@ -57,7 +57,7 @@ def test_build_players_falls_back_to_riot_name():
 
 
 def test_build_players_uses_bot_elo_not_riot():
-    """L'ELO de matchmaking provient de elo_<guild>, jamais des riot_accounts."""
+    """L'ELO de matchmaking provient de la collection partagée `elo`, jamais des riot_accounts."""
     players = build_players(
         player_ids=["1"],
         riot_accounts={"1": _riot_doc()},   # peak_elo 2500 ignore
@@ -68,7 +68,7 @@ def test_build_players_uses_bot_elo_not_riot():
 
 
 def test_build_players_zero_when_no_bot_elo():
-    """Si elo_<guild> n'a pas de doc pour le joueur, ELO = 0."""
+    """Si la collection partagée `elo` n'a pas de doc pour le joueur, ELO = 0."""
     players = build_players(
         player_ids=["1"],
         riot_accounts={"1": _riot_doc()},

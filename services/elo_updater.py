@@ -1,5 +1,5 @@
 """
-Met a jour l'ELO des joueurs (table V1 `elo_<guild_id>`) apres validation
+Met a jour l'ELO des joueurs (collection partagée `elo`) apres validation
 d'un match V2.
 
 Le gain/loss est proportionnel a la moyenne d'effective_elo (Riot) des

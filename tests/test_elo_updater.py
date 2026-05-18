@@ -366,7 +366,7 @@ def test_apply_match_validation_open_queue_uses_multipliers():
 
 
 def test_apply_match_validation_uses_compound_doc_id():
-    """Le doc joueur dans elo_<guild> est cree avec _id=<user_id>:<queue_type>."""
+    """Le doc joueur dans la collection partagée `elo` est cree avec _id=<user_id>:<queue_type>."""
     import bot as bot_module
     db = bot_module.db
     match_doc = {
