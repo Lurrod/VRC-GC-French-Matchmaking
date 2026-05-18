@@ -49,3 +49,22 @@ def test_queue_collection_remains_per_guild(db):
     col_b = repository.get_queue_col(db, guild_id=200)
     assert col_a.name == "queue_100"
     assert col_b.name == "queue_200"
+
+
+def test_create_match_persists_origin_guild_id(db):
+    """create_match writes int(origin_guild_id) to the doc and get_match reads it back."""
+    match_id = repository.create_match(
+        db,
+        queue_type="pro",
+        origin_guild_id=12345,
+        team_a=[{"user_id": "1", "elo": 2000}],
+        team_b=[{"user_id": "2", "elo": 2000}],
+        map_name="Haven",
+        lobby_leader_id=1,
+        category_name=None,
+        message_id=None,
+        channel_id=None,
+    )
+    doc = repository.get_match(db, match_id)
+    assert doc is not None
+    assert doc["origin_guild_id"] == 12345
