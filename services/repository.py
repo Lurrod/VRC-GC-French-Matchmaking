@@ -746,3 +746,54 @@ def claim_host_role_cleanup(
         {"$set": {"host_role_cleanup_done": True}},
     )
     return res.modified_count == 1
+
+
+# ── Warns (moderation) ────────────────────────────────────────────────
+# Stockage par guild : chaque serveur a son propre historique de warns.
+
+def get_warns_col(db: Database, guild_id: int | str) -> Collection:
+    return db[f"warns_{guild_id}"]
+
+
+def add_warn(
+    db: Database,
+    guild_id: int | str,
+    *,
+    member_id: int,
+    member_name: str,
+    moderator_id: int,
+    moderator_name: str,
+    reason: str,
+) -> None:
+    from datetime import datetime
+    get_warns_col(db, guild_id).insert_one({
+        "member_id": int(member_id),
+        "member_name": member_name,
+        "moderator_id": int(moderator_id),
+        "moderator_name": moderator_name,
+        "reason": reason,
+        "timestamp": datetime.now(UTC),
+    })
+
+
+def list_warns(
+    db: Database,
+    guild_id: int | str,
+    *,
+    member_id: int | None = None,
+    limit: int = 50,
+) -> list[Mapping[str, Any]]:
+    """Renvoie les warns du guild, du plus recent au plus ancien.
+
+    Si `member_id` est fourni, filtre sur les warns de ce membre uniquement.
+    """
+    filt: dict[str, Any] = {}
+    if member_id is not None:
+        filt["member_id"] = int(member_id)
+    cursor = (
+        get_warns_col(db, guild_id)
+        .find(filt)
+        .sort("timestamp", -1)
+        .limit(limit)
+    )
+    return list(cursor)

@@ -120,6 +120,7 @@ async def _load_v2_cogs() -> None:
     from cogs.applications import setup as setup_applications
     from cogs.elo_admin import setup as setup_elo_admin
     from cogs.match    import setup as setup_match
+    from cogs.moderation import setup as setup_moderation
     from cogs.prefix_legacy import setup as setup_prefix_legacy
     from cogs.queue_v2 import setup as setup_queue_v2
     from cogs.riot_link import setup as setup_riot_link
@@ -130,6 +131,7 @@ async def _load_v2_cogs() -> None:
     await setup_applications(bot, db)
     await setup_admin(bot, db)
     await setup_elo_admin(bot, db)
+    await setup_moderation(bot, db)
     await setup_prefix_legacy(bot, db)
 
 
