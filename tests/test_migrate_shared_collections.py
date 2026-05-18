@@ -51,3 +51,36 @@ def test_migration_idempotent_when_no_source(env):
         rc = migrate_shared_collections.main()
 
     assert rc == 0
+
+
+def test_migration_idempotent_when_both_source_and_dest_present(env):
+    """Re-running with both source and destination populated must merge cleanly.
+
+    Scenario: first run was interrupted between copy and rename, so the
+    source still exists. The destination already has the same _id docs.
+    A second run must overwrite/upsert without losing destination-only docs.
+    """
+    fake_client = mongomock.MongoClient()
+    fake_db = fake_client["elobot"]
+
+    # Source still has doc m1 with old value
+    fake_db["matches_111"].insert_one({"_id": "m1", "winner": "a", "rev": 1})
+    # Destination already has doc m1 (copied earlier) AND a destination-only doc m2
+    fake_db["matches"].insert_one({"_id": "m1", "winner": "a", "rev": 1})
+    fake_db["matches"].insert_one({"_id": "m2", "winner": "b", "rev": 99})
+
+    with patch("scripts.migrate_shared_collections.MongoClient", return_value=fake_client):
+        from scripts import migrate_shared_collections
+        rc = migrate_shared_collections.main()
+
+    assert rc == 0
+    # m1 still present (idempotent upsert)
+    assert fake_db["matches"].find_one({"_id": "m1"})["rev"] == 1
+    # m2 (destination-only) MUST still be there — not deleted
+    m2 = fake_db["matches"].find_one({"_id": "m2"})
+    assert m2 is not None, "Migration must not delete destination-only docs"
+    assert m2["rev"] == 99
+    # Source archived (renamed)
+    names = fake_db.list_collection_names()
+    assert "matches_111" not in names
+    assert any(n.endswith("_matches_111") and n.startswith("archive_") for n in names)
